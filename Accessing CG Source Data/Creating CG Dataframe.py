@@ -84,4 +84,22 @@ display(cg_df)
 
 # COMMAND ----------
 
+cg_df.createTempView("cg_tv")
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT 
+# MAGIC `cg_tv`.`Person ICN` as PersonICN,
+# MAGIC substr(`cg_tv`.`Person ICN`, 1, 10) AS CalcPersonICN
+# MAGIC , `cg_tv`.`Applicant Type` as ApplicantType
+# MAGIC , `cg_tv`.`Caregiver Status` AS CaregiveStatus
+# MAGIC ,`cg_tv`.`Benefits End Date` AS BenifitsEndDate
+# MAGIC , `cg_tv`.`Dispositioned Date` AS DisposiotionedDate
+# MAGIC , `cg_tv`.`CARMA Case Details: Veteran ICN` AS CarmaCaseDetailsVeteranICN
+# MAGIC ,substr(`cg_tv`.`CARMA Case Details: Veteran ICN`, 1, 10) AS CalcVeteranICN
+# MAGIC FROM cg_tv
+
+# COMMAND ----------
+
 
