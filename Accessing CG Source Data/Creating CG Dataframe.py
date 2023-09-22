@@ -1,4 +1,9 @@
 # Databricks notebook source
+# MAGIC %md
+# MAGIC ##### Locating the mount
+
+# COMMAND ----------
+
 # MAGIC %fs
 # MAGIC ls
 
@@ -12,7 +17,17 @@ display(dbutils.fs.ls('/mnt/ci-carma/landing/'))
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ##### Installing openpyxl library to read excel file into a pandas dataframe
+
+# COMMAND ----------
+
 pip install openpyxl
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ##### Importing the necessary libraries
 
 # COMMAND ----------
 
@@ -22,8 +37,18 @@ from pyspark.sql.functions import *
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ##### Loading the full dataset into a pandas dataframe
+
+# COMMAND ----------
+
 filePath = '/dbfs/mnt/ci-carma/initialSeed/Caregivers_23August2023.xlsx'
 df = pd.read_excel(filePath,engine='openpyxl')
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ##### Defining functions that accepts Pandas Dataframe and returns Spark Dataframe
 
 # COMMAND ----------
 
@@ -40,7 +65,7 @@ def define_structure(string, format_type):
     except: typo = StringType()
     return StructField(string, typo)
 
-# Given pandas dataframe, it will return a spark's dataframe.
+
 def pandas_to_spark(pandas_df):
     columns = list(pandas_df.columns)
     types = list(pandas_df.dtypes)
@@ -64,11 +89,6 @@ display(cg_df)
 
 # COMMAND ----------
 
-from pyspark.sql.functions import to_date
-
-# COMMAND ----------
-
-
 cg_df = cg_df.select(
     cg_df["Person ICN"].alias("Full_Person_ICN"),
     cg_df["Applicant Type"].alias("Applicant _Type"),
@@ -85,16 +105,16 @@ cg_df = cg_df.select(
 
 # COMMAND ----------
 
-cg_df1 = cg_df.withColumn('CG_ICN', col("Full_Person_ICN").substr(1,10))\
+cg_df = cg_df.withColumn('CG_ICN', col("Full_Person_ICN").substr(1,10))\
     .withColumn('Veteran_ICN', col("Full_Veteran_ICN").substr(1,10))
 
 # COMMAND ----------
 
-display(cg_df1)
+display(cg_df)
 
 # COMMAND ----------
 
-cg_df1.createOrReplaceTempView("cg_full_load_table")
+cg_df.createOrReplaceTempView("cg_full_load_table")
 
 # COMMAND ----------
 
@@ -102,30 +122,33 @@ spark.sql("SELECT * FROM cg_full_load_table").show(10)
 
 # COMMAND ----------
 
-#cg_csv_df = spark.read.format("csv").option("header","true").load('/mnt/ci-carma/landing/caregiverevent-6e110430-57ff-11ee-a720-0631cc63e406.csv')
-                                                                    
-dd =  spark.read.csv('/mnt/ci-carma/landing/caregiverevent-6e110430-57ff-11ee-a720-0631cc63e406.csv', header=True, inferSchema=True)
+# MAGIC %md
+# MAGIC ##### Loading updates (.csv) file into a dataframe
 
 # COMMAND ----------
 
-display(dd)
+updates_df = spark.read.format("csv").option("header","true").load('/mnt/ci-carma/landing/caregiverevent-6e110430-57ff-11ee-a720-0631cc63e406.csv')
 
 # COMMAND ----------
 
-dd = dd.select(dd['Discharge_Revocation_Date__c'].alias('Discharge_Revocation_Date'),\
-    dd['Caregiver_Status__c'].alias('Caregiver_Status'),\
-    dd['Dispositioned_Date__c'].alias('Dispositioned_Date'),\
-    dd['Applicant_Type__c'].alias('Applicant_Type'),\
-    dd['CreatedDate'].alias('Created_Date'),\
-    dd['Veteran_ICN__c'].alias('Full_Veteran_ICN'),\
-    substring(dd['Veteran_ICN__c'],1,10).alias('Veteran_ICN'),\
-    dd['Benefits_End_Date__c'].alias('Benefits_End_Date'),\
-    dd['Caregiver_ICN__c'].alias('Full_Caregiver_ICN'),\
-    substring(dd['Caregiver_ICN__c'],1,10).alias('CG_ICN'))
+display(updates_df)
 
 # COMMAND ----------
 
-dd.createOrReplaceTempView("cg_csv_table")
+updates_df = updates_df.select(updates_df['Discharge_Revocation_Date__c'].alias('Discharge_Revocation_Date'),\
+    updates_df['Caregiver_Status__c'].alias('Caregiver_Status'),\
+    updates_df['Dispositioned_Date__c'].alias('Dispositioned_Date'),\
+    updates_df['Applicant_Type__c'].alias('Applicant_Type'),\
+    updates_df['CreatedDate'].alias('Created_Date'),\
+    updates_df['Veteran_ICN__c'].alias('Full_Veteran_ICN'),\
+    substring(updates_df['Veteran_ICN__c'],1,10).alias('Veteran_ICN'),\
+    updates_df['Benefits_End_Date__c'].alias('Benefits_End_Date'),\
+    updates_df['Caregiver_ICN__c'].alias('Full_Caregiver_ICN'),\
+    substring(updates_df['Caregiver_ICN__c'],1,10).alias('CG_ICN'))
+
+# COMMAND ----------
+
+updates_df.createOrReplaceTempView("cg_csv_table")
 
 # COMMAND ----------
 
@@ -151,6 +174,49 @@ display(spark.sql("SELECT * FROM cg_csv_table "))
 # COMMAND ----------
 
 display(dbutils.fs.ls('/mnt/ci-vadir-shared/'))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ##### Below sql script will help extracting EDIPI
+# MAGIC
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC SELECT 
+# MAGIC [MVIPersonSiteAssociationSID]
+# MAGIC ,[MVIPersonSiteAssociationIEN]
+# MAGIC ,[MVIPersonICN]
+# MAGIC ,[MVIPersonSID]
+# MAGIC ,[MVITreatingFacilityInstitutionSID]
+# MAGIC ,[TreatingFacilityPersonIdentifier]
+# MAGIC ,[EDIPI]
+# MAGIC ,[PersonSSN]
+# MAGIC ,[SSNVerificationStatus]
+# MAGIC ,[SSNVerificationStatusCode]
+# MAGIC ,[VeteranFlag]
+# MAGIC ,[LastName]
+# MAGIC ,[FirstName]
+# MAGIC ,[MiddleName]
+# MAGIC ,[NamePrefix]
+# MAGIC ,[NameSuffix]
+# MAGIC ,[MotherMaidenName]
+# MAGIC ,[Gender]
+# MAGIC ,[BirthDateTime]
+# MAGIC ,[BirthCity]
+# MAGIC ,[MVIBirthStateSID]
+# MAGIC ,[MVIBirthCountrySID]
+# MAGIC ,[IsPatient]
+# MAGIC ,[IsVeteran]
+# MAGIC ,[IsAssociatedIndividual]
+# MAGIC ,[IsEmployee]
+# MAGIC ,[IsContractor]
+# MAGIC ,[IsCaregiver]
+# MAGIC ,[IsOther]
+# MAGIC ,[calc_DOD_EDIPI]
+# MAGIC FROM [IdentityData].[PERSON_SITE_ASSOCIATIONS]
+# MAGIC WHERE MVIPersonICN = '1021034530' and MVITreatingFacilityInstitutionSID = 5667
 
 # COMMAND ----------
 
@@ -185,4 +251,28 @@ with open(file_path_dat, "r") as file:
 
 # COMMAND ----------
 
+import pyodbc
 
+pyodbc.drivers()
+
+# COMMAND ----------
+
+PersonTable_df = (spark.read
+  .format("jdbc")
+  .option("url", "jdbc:sqlserver://vac21vdwaswdev.sql.azuresynapse.usgovcloudapi.net:1433;database=sqldbdevcxdw")
+  .option("dbtable", "IdentityData.PERSON_SITE_ASSOCIATIONS")
+  .option("user", "<username>")
+  .option("password", "<password>")
+  .load()
+)
+
+# COMMAND ----------
+
+#copied from Azure Portal
+jdbc:sqlserver://vac21vdwaswdev.sql.azuresynapse.usgovcloudapi.net:1433;database=sqldbdevcxdw;user=sqladminuser@vac21vdwaswdev;password={your_password_here};encrypt=true;trustServerCertificate=false;hostNameInCertificate=*.sql.azuresynapse.usgovcloudapi.net;loginTimeout=30;
+
+# COMMAND ----------
+
+#copied from Synapse
+
+jdbc:sqlserver://vac20vdwasynprod.sql.azuresynapse.usgovcloudapi.net:1433;database=sqldbprodcxdw;user=undefined@vac20vdwasynprod;password={your_password_here};encrypt=true;trustServerCertificate=false;hostNameInCertificate=*.sql.azuresynapse.net;loginTimeout=30;
