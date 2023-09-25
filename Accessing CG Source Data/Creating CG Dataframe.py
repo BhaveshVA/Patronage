@@ -6,6 +6,7 @@
 
 # MAGIC %fs
 # MAGIC ls
+# MAGIC
 
 # COMMAND ----------
 
@@ -85,28 +86,57 @@ cg_df = pandas_to_spark(df)
 
 # COMMAND ----------
 
-display(cg_df)
+display(cg_df.count())
+
+# COMMAND ----------
+
+null_person_icn_df = cg_df.where(cg_df['Person ICN'].isNull())
+
+# COMMAND ----------
+
+null_person_icn_df.display()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ##### Loading only those records that are Not Null into cg_df dataframe
+
+# COMMAND ----------
+
+cg_df = cg_df.where(cg_df['Person ICN'].isNotNull())
+
+# COMMAND ----------
+
+display(cg_df.count())
 
 # COMMAND ----------
 
 cg_df = cg_df.select(
     cg_df["Person ICN"].alias("Full_Person_ICN"),
-    cg_df["Applicant Type"].alias("Applicant _Type"),
+    cg_df["Applicant Type"].alias("Applicant_Type"),
     cg_df["Caregiver Status"].alias("Caregiver_Status"),
-    to_date(cg_df["Dispositioned Date"], "MM/dd/yyyy").alias("Dispositioned_Date"),
-    to_date(cg_df["Benefits End Date"], "MM/dd/yyyy").alias("Benefits_End_Date"),
+    to_date(cg_df["Dispositioned Date"], "yyyy-MM-dd").alias("Dispositioned_Date"),
+    to_date(cg_df["Benefits End Date"], "yyyy-MM-dd").alias("Benefits_End_Date"),
     cg_df["CARMA Case Details: Veteran ICN"].alias("Full_Veteran_ICN"),
 )
 
 # COMMAND ----------
 
+display(cg_df)
+
+# COMMAND ----------
+
 # MAGIC %md
-# MAGIC ##### Splitting Person ICN and CARMA Case Details: Veteran ICN
+# MAGIC ##### Splitting Person ICN and CARMA Case Details: Veteran ICN and adding additional columns.
 
 # COMMAND ----------
 
 cg_df = cg_df.withColumn('CG_ICN', col("Full_Person_ICN").substr(1,10))\
-    .withColumn('Veteran_ICN', col("Full_Veteran_ICN").substr(1,10))
+    .withColumn('Veteran_ICN', col("Full_Veteran_ICN").substr(1,10))\
+    .withColumn('Batch_CD',lit("CG"))\
+    .withColumn("SC_COMBINED_DISABILITY_PERCENTAGE", lit(""))\
+    .withColumn("P&T_INDICATOR", lit(""))\
+    .withColumn("INDIVIDUAL_UNEMPLOYABILITY", lit(""))    
 
 # COMMAND ----------
 
@@ -118,7 +148,54 @@ cg_df.createOrReplaceTempView("cg_full_load_table")
 
 # COMMAND ----------
 
-spark.sql("SELECT * FROM cg_full_load_table").show(10)
+spark.sql("DESCRIBE TABLE cg_full_load_table").show()
+
+# COMMAND ----------
+
+spark.sql("select * from cg_full_load_table").display()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ##### Checking Full_Person_ICN for NULL values
+
+# COMMAND ----------
+
+display(spark.sql("SELECT * FROM cg_full_load_table WHERE Full_Person_ICN IS NULL"))
+
+# COMMAND ----------
+
+# MAGIC %md
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ##### Joining IdentityData.Person_Site_Assoiciations table with cg_full_load_table to get *EDIPI*
+
+# COMMAND ----------
+
+spark.sql(
+    "select mvi.EDIPI, cg.Full_Person_ICN, cg.Applicant_Type, cg.Caregiver_Status, cg.Dispositioned_Date, cg.Benefits_End_Date, cg.Full_Veteran_ICN, cg.CG_ICN, cg.Veteran_ICN from cg_full_load_table cg join IdentityData.PERSON_SITE_ASSOCIATIONS mvi on mvi.MVIPersonICN = cg.CG_ICN WHERE mvi.MVITreatingFacilityInstitutionSID = 5667"
+)
+
+# COMMAND ----------
+
+spark.sql(
+    "select mvi.EDIPI as EDIPI, CG as Batch_CD,  cg.Full_Person_ICN, cg.Applicant_Type, cg.Caregiver_Status, cg.Dispositioned_Date, cg.Benefits_End_Date, cg.Full_Veteran_ICN, cg.CG_ICN, cg.Veteran_ICN from cg_full_load_table cg join IdentityData.PERSON_SITE_ASSOCIATIONS mvi on mvi.MVIPersonICN = cg.CG_ICN WHERE mvi.MVITreatingFacilityInstitutionSID = 5667"
+)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ##### Fields required for the Patronage Schema
+# MAGIC * EDIPI: string
+# MAGIC * BATCH_CD: string
+# MAGIC * SC_COMBINED_DISABILITY_PERCENTAGE: string
+# MAGIC * P&T_INDICATOR: string
+# MAGIC * INDIVIDUAL_UNEMPLOYABILITY: string
+# MAGIC * STATUS_BEGIN_DATE: date
+# MAGIC * STATUS_LAST_UPDATE_DATE: date
+# MAGIC * STATUS_TERMINATION_DATE: date
 
 # COMMAND ----------
 
@@ -137,12 +214,12 @@ display(updates_df)
 
 updates_df = updates_df.select(updates_df['Discharge_Revocation_Date__c'].alias('Discharge_Revocation_Date'),\
     updates_df['Caregiver_Status__c'].alias('Caregiver_Status'),\
-    updates_df['Dispositioned_Date__c'].alias('Dispositioned_Date'),\
+    to_date(updates_df['Dispositioned_Date__c'], "MM/dd/yyyy").alias('Status_Begin_Date'),\
     updates_df['Applicant_Type__c'].alias('Applicant_Type'),\
-    updates_df['CreatedDate'].alias('Created_Date'),\
+    to_date(updates_df['CreatedDate'], "MM/dd/yyyy").alias('Created_Date'),\
     updates_df['Veteran_ICN__c'].alias('Full_Veteran_ICN'),\
     substring(updates_df['Veteran_ICN__c'],1,10).alias('Veteran_ICN'),\
-    updates_df['Benefits_End_Date__c'].alias('Benefits_End_Date'),\
+    to_date(updates_df['Benefits_End_Date__c'], "MM/dd/yyyy").alias('Benefits_End_Date'),\
     updates_df['Caregiver_ICN__c'].alias('Full_Caregiver_ICN'),\
     substring(updates_df['Caregiver_ICN__c'],1,10).alias('CG_ICN'))
 
@@ -153,6 +230,10 @@ updates_df.createOrReplaceTempView("cg_csv_table")
 # COMMAND ----------
 
 display(spark.sql("SELECT * FROM cg_csv_table "))
+
+# COMMAND ----------
+
+spark.sql("DESCRIBE cg_csv_table").show()
 
 # COMMAND ----------
 
@@ -227,6 +308,10 @@ display(dbutils.fs.ls('/mnt/ci-vadir-shared/'))
 
 # COMMAND ----------
 
+
+
+# COMMAND ----------
+
 file_path = '/mnt/ci-vadir-shared/VETPOP_MSTR_EXTRCT_202308.txt'
 scd = spark.read.option("delimiter","^").csv(file_path, header=True)
 
@@ -276,3 +361,12 @@ jdbc:sqlserver://vac21vdwaswdev.sql.azuresynapse.usgovcloudapi.net:1433;database
 #copied from Synapse
 
 jdbc:sqlserver://vac20vdwasynprod.sql.azuresynapse.usgovcloudapi.net:1433;database=sqldbprodcxdw;user=undefined@vac20vdwasynprod;password={your_password_here};encrypt=true;trustServerCertificate=false;hostNameInCertificate=*.sql.azuresynapse.net;loginTimeout=30;
+
+# COMMAND ----------
+
+mvi_site_df = spark.read.format("delta").load("/mnt/mviinstitution")#spark.sql("SELECT * FROM cdwwork.sveteran_smvipersonsiteassociation")
+mvi_institution_df = spark.read.format("delta").load("/mnt/smvipersonsiteassociation")#spark.sql("SELECT * FROM cdwwork.ndim_mviinstitution")
+
+# COMMAND ----------
+
+
