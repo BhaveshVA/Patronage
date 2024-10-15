@@ -306,115 +306,144 @@ def process_updates(edipi_df, file_type):
     Parameters: Pyspark dataframe and file type
     Returns: None
     """
+    # Optimize the table based on the event timestamp
     spark.sql("OPTIMIZE mypatronage_new ZORDER BY (SDP_Event_Created_Timestamp)")
 
+    # Load the target Delta table
     targetTable = DeltaTable.forPath(spark, "dbfs:/user/hive/warehouse/mypatronage_new")
     targetDF = targetTable.toDF().filter(
         (col("Batch_CD") == file_type) & (col("RecordStatus") == True)
     )
+    # Rename columns in targetDF for clarity
     targetDF = targetDF.select([col(c).alias(f"target_{c}") for c in targetDF.columns])
 
-    if file_type == "CG":
-        join_with_target_condition = (
+    # Define join conditions based on file type
+    join_conditions = {
+        "CG": (
             (edipi_df.ICN == targetDF.target_ICN)
             & (edipi_df.Veteran_ICN == targetDF.target_Veteran_ICN)
             & (edipi_df.Batch_CD == targetDF.target_Batch_CD)
             & (edipi_df.Applicant_Type == targetDF.target_Applicant_Type)
-            & (targetDF.target_RecordStatus == "True")
-        )
-    elif file_type in ["SCD"]:
-        join_with_target_condition = (
+            & (targetDF.target_RecordStatus == True)
+        ),
+        "SCD": (
             (edipi_df.ICN == targetDF.target_ICN)
-            & (
-                targetDF.target_RecordStatus == "True"
-            )  
+            & (targetDF.target_RecordStatus == True)
             & (edipi_df.Batch_CD == targetDF.target_Batch_CD)
-        )
+        ),
+    }
 
-    joinDF = edipi_df.join(targetDF, join_with_target_condition, "leftouter")
-
-    if file_type == "SCD":
-        joinDF = (
-            joinDF.withColumn(
-                "Status_Last_Update",
-                when(
-                    (
-                        (col("target_participant_id") != (col("participant_id")))
-                        & (col("Status_Last_Update").isNull())
-                    ),
-                    None,
-                ).otherwise(col("Status_Begin_Date")),
-            )
-            .withColumn(
-                "Updated_Status_Begin_Date",
-                when(
-                    (
-                        (
-                            xxhash64(col("Status_Begin_Date"))
-                            != xxhash64(col("target_Status_Begin_Date"))
-                        )
-                        & col("target_Status_Begin_Date").isNotNull()
-                    ),
-                    col("target_Status_Begin_Date"),
-                ).otherwise(col("Status_Begin_Date")),
-            )
-            .drop("Status_Begin_Date")
-            .withColumnRenamed("Updated_Status_Begin_Date", "Status_Begin_Date")
-            .withColumn(
-                "PT_Indicator", coalesce(joinDF["target_PT_Indicator"], lit("N"))
-            )
-        )
-
-    if file_type == "CG":
-        delta_condition = xxhash64(
-            joinDF.Status_Begin_Date,
-            joinDF.Status_Termination_Date,
-            joinDF.Applicant_Type,
-            joinDF.Caregiver_Status,
+    # Define delta condition based on file type
+    delta_conditions = {
+        "CG": xxhash64(
+            col("Status_Begin_Date"),
+            col("Status_Termination_Date"),
+            col("Applicant_Type"),
+            col("Caregiver_Status")
         ) != xxhash64(
-            joinDF.target_Status_Begin_Date,
-            joinDF.target_Status_Termination_Date,
-            joinDF.target_Applicant_Type,
-            joinDF.target_Caregiver_Status,
-        )
-    elif file_type == "SCD":
-        delta_condition = xxhash64(
-            joinDF.SC_Combined_Disability_Percentage
-        ) != xxhash64(joinDF.target_SC_Combined_Disability_Percentage)
+            col("target_Status_Begin_Date"),
+            col("target_Status_Termination_Date"),
+            col("target_Applicant_Type"),
+            col("target_Caregiver_Status")
+        ),
+        "SCD": xxhash64(
+            col("SC_Combined_Disability_Percentage")
+        ) != xxhash64(col("target_SC_Combined_Disability_Percentage")),
+    }
 
-    filterDF = joinDF.filter(delta_condition)
+    # Track changes in specified columns and create a change log
+    columns_to_track = {
+        "CG": [
+            ("Status_Begin_Date", "target_Status_Begin_Date"),
+            ("Status_Termination_Date", "target_Status_Termination_Date"),
+            ("Applicant_Type", "target_Applicant_Type"),
+            ("Caregiver_Status", "target_Caregiver_Status")
+        ],
+        "SCD": [(
+            "SC_Combined_Disability_Percentage", "target_SC_Combined_Disability_Percentage"),
+        ]
+    }
 
-    if file_type == "CG":
-        concat_column = concat(
-            filterDF.ICN, filterDF.Veteran_ICN, filterDF.Applicant_Type
-        )
-    elif file_type == "SCD":
-        concat_column = filterDF.ICN
+    # Define merge conditions and batch_cd
+    merge_conditions = {
+        "CG": "concat(target.ICN, target.Veteran_ICN, target.Applicant_Type) = source.MERGEKEY and target.RecordStatus = True",
+        "SCD": "((target.ICN = source.MERGEKEY) and (target.Batch_CD = source.Batch_CD) and (target.RecordStatus = True))"
+    }
 
-    mergeDF = filterDF.withColumn("MERGEKEY", concat_column)
+    # Define concat_column based on file type
+    concat_column = {
+        "CG": concat(col("ICN"), col("Veteran_ICN"), col("Applicant_Type")),
+        "SCD": col("ICN")
+    }
 
-    dummyDF = filterDF.filter(col("target_ICN").isNotNull()).withColumn(
-        "MERGEKEY", lit(None)
-    )
+    # Perform the join based on file type
+    if file_type in ["CG", "SCD"]:
+        joinDF = edipi_df.join(targetDF, join_conditions[file_type], "leftouter")
 
-    upsert_df = mergeDF.union(dummyDF)
+        # Handling logic for SCD file type
+        if file_type == "SCD":
+            joinDF = (
+                joinDF.withColumn(
+                    "Status_Last_Update",
+                    col("DSBL_DTR_DT")
+                )
+                .withColumn(
+                    "Status_Begin_Date",
+                    coalesce(col("target_Status_Begin_Date"), col("DSBL_DTR_DT"))
+                )
+                .withColumn(
+                    "PT_Indicator", coalesce(joinDF["target_PT_Indicator"], lit("N"))
+                )
+            )
 
-    if file_type == "CG":
-        batch_cd = "CG"
-        merge_condition = "concat(target.ICN, target.Veteran_ICN, target.Applicant_Type) = source.MERGEKEY and target.RecordStatus = True"
-    else:
-        batch_cd = "SCD"
-        merge_condition = "((target.ICN = source.MERGEKEY) and (target.Batch_CD = source.Batch_CD) and (target.RecordStatus = True))"
+        change_conditions = []
+        for source_col, target_col in columns_to_track[file_type]:
+            change_condition = when(
+                xxhash64(coalesce(col(source_col), lit("Null"))) != xxhash64(coalesce(col(target_col), lit("Null"))),
+                concat_ws(
+                    " ",
+                    lit(source_col),
+                    lit("old value:"),
+                    coalesce(col(target_col), lit("Null")),
+                    lit("changed to new value:"),
+                    coalesce(col(source_col), lit("Null"))
+                )
+            ).otherwise(lit(""))
+            change_conditions.append(change_condition)
 
-    targetTable = DeltaTable.forPath(spark, "dbfs:/user/hive/warehouse/mypatronage_new")
+        new_record_condition = when(
+            col("target_icn").isNull(), 
+            lit("New Record")
+            ).otherwise(lit("Updated Record")
+            )
 
-    targetDF = targetTable.toDF().filter(
-        (col("Batch_CD") == batch_cd) & (col("RecordStatus") == True)
-    )
+        joinDF = joinDF.withColumn("RecordChangeStatus", new_record_condition)
 
+        if len(change_conditions) > 0:
+            change_log_col = concat_ws(". ", *[coalesce(cond, lit("")) for cond in change_conditions])
+        else:
+            change_log_col = lit("")
+
+        joinDF = joinDF.withColumn("change_log", change_log_col)
+
+        # Filter records that have changes based on delta condition
+        filterDF = joinDF.filter(delta_conditions[file_type])
+
+        # Handle dummy records with null MERGEKEY for unmatched records
+        mergeDF = filterDF.withColumn("MERGEKEY", concat_column[file_type])
+        dummyDF = filterDF.filter(col("target_ICN").isNotNull()).withColumn("MERGEKEY", lit(None))
+
+        # Union the filtered and dummy DataFrames
+        upsert_df = mergeDF.union(dummyDF)
+
+    if file_type == "PAI":
+        file_type = "SCD"
+        upsert_df = edipi_df 
+ 
+    # Perform the merge operation
     targetTable.alias("target").merge(
         upsert_df.alias("source"),
-        condition=merge_condition,
+        merge_conditions[file_type]
     ).whenMatchedUpdate(
         set={
             "RecordStatus": "False",
@@ -441,6 +470,8 @@ def process_updates(edipi_df, file_type):
             "RecordLastUpdated": "source.RecordLastUpdated",
             "filename": "source.filename",
             "sentToDoD": "false",
+            "change_log": "source.change_log",
+            "RecordChangeStatus": "source.RecordChangeStatus"
         }
     ).execute()
 
@@ -486,19 +517,16 @@ def prepare_caregivers_data(cg_csv_files):
                         col("Applicant_Type__c").alias("Applicant_Type"),
                         col("Caregiver_Status__c").alias("Caregiver_Status"),
                         date_format("Dispositioned_Date__c", "yyyyMMdd")
-                        .alias("Status_Begin_Date")
-                        .cast(StringType()),
+                        .alias("Status_Begin_Date").cast(StringType()),
                         col("CreatedDate").cast("timestamp").alias("Event_Created_Date"),
-                        lit(False).alias("sentToDoD").cast(BooleanType()),
-                        lit("CG").alias("Batch_CD"),
                         "filename",
                         "SDP_Event_Created_Timestamp",
                     )
                 ).filter(col("Caregiver_ICN__c").isNotNull())
 
     edipi_df = (
-        combined_cg_df.alias("source")
-        .join(icn_relationship.alias("lookup"), "ICN", "left")
+        combined_cg_df
+        .join(icn_relationship, ["ICN"], "left")
         .withColumn("Individual_Unemployability", lit(None).cast(StringType()))
         .withColumn("PT_Indicator", lit(None).cast(StringType()))
         .withColumn("SC_Combined_Disability_Percentage", lit(None).cast(StringType()))
@@ -506,23 +534,55 @@ def prepare_caregivers_data(cg_csv_files):
         .withColumn("RecordLastUpdated", lit(None).cast(DateType()))
         .withColumn("Status_Last_Update", lit(None).cast(StringType()))
         .withColumn("sentToDoD", lit(False).cast(BooleanType()))
+        .withColumn("Batch_CD", lit("CG").cast(StringType()))
         .withColumn("rank", rank().over(Window_Spec))
         .filter(col("rank") == 1)
-        .dropDuplicates()
-        .select(
-            "source.*",
-            "lookup.EDIPI",
-            "lookup.participant_id",
-            "SC_Combined_Disability_Percentage",
-            "Individual_Unemployability",
-            "PT_Indicator",
-            "RecordLastUpdated",
-            "RecordStatus",
-            "Status_Last_Update",
-            "sentToDoD",
-        )
+        .dropDuplicates().drop("rank", "va_profile_id", "record_updated_date")
     ).orderBy(col("Event_Created_Date"))
+
     return edipi_df
+
+# COMMAND ----------
+
+# DBTITLE 1,Test code
+# scd_updates_df = (
+#         spark.read.csv("dbfs:/mnt/ci-vadir-shared/CPIDODIEX_202310_spool.csv", schema=scd_schema, header=True)
+#         .selectExpr( "PTCPNT_ID as participant_id", "CMBNED_DEGREE_DSBLTY", "DSBL_DTR_DT")
+#         .withColumn("filename", col("_metadata.file_path"))
+#         .withColumn("sentToDoD", lit(False).cast(BooleanType()))
+#         .withColumn("SDP_Event_Created_Timestamp", (col("_metadata.file_modification_time")).cast(TimestampType()))
+#         .withColumn("SC_Combined_Disability_Percentage",
+#                     lpad(
+#                         coalesce(when(col("CMBNED_DEGREE_DSBLTY")=="", lit('000')).otherwise(col("CMBNED_DEGREE_DSBLTY"))),
+#                         3,
+#                         "0"
+#                     )
+#         )
+#         .withColumn("Veteran_ICN", lit(None).cast(StringType()))
+#         .withColumn("Applicant_Type", lit(None).cast(StringType()))
+#         .withColumn("Caregiver_Status", lit(None).cast(StringType()))
+#         .withColumn("Individual_Unemployability", lit(None).cast(StringType()))
+#         .withColumn("Status_Termination_Date", lit(None).cast(StringType()))
+#         .withColumn("RecordLastUpdated", lit(None).cast(DateType()))
+#         .withColumn("Batch_CD", lit("SCD"))
+#         .withColumn("RecordStatus", lit(True).cast(BooleanType()))
+#         .withColumn("DSBL_DTR_DT",
+#                     when(col("DSBL_DTR_DT") == "", None)
+#                     .otherwise( date_format(to_date(col("DSBL_DTR_DT"), "MMddyyyy"), "yyyyMMdd"))
+#         ).filter(col("DSBL_DTR_DT").isNotNull())
+#     )
+
+# Window_Spec = Window.partitionBy(scd_updates_df["participant_id"]).orderBy(
+#     desc("DSBL_DTR_DT"), desc("SC_Combined_Disability_Percentage")
+# )
+
+# edipi_df = (scd_updates_df.join(
+#     icn_relationship, ["participant_id"], "left"
+# ).withColumn("rank", rank().over(Window_Spec))
+# .filter(col("rank") == 1)
+# .filter(col("ICN").isNotNull())
+# .dropDuplicates()
+# .drop("rank", "va_profile_id", "record_updated_date"))
 
 # COMMAND ----------
 
@@ -545,98 +605,120 @@ def prepare_scd_data(row):
 
     scd_updates_df = (
         spark.read.csv(file_name, schema=schema, header=True)
-        .withColumnRenamed("CMBNED_DEGREE_DSBLTY", "SC_Combined_Disability_Percentage")
-        .withColumnRenamed("PTCPNT_ID", "participant_id")
+        .selectExpr( "PTCPNT_ID as participant_id", "CMBNED_DEGREE_DSBLTY", "DSBL_DTR_DT")
         .withColumn("filename", col("_metadata.file_path"))
         .withColumn("sentToDoD", lit(False).cast(BooleanType()))
-        .withColumn(
-            "SDP_Event_Created_Timestamp",
-            (col("_metadata.file_modification_time")).cast(TimestampType()),
-        )
+        .withColumn("SDP_Event_Created_Timestamp", (col("_metadata.file_modification_time")).cast(TimestampType()))
+        .withColumn("SC_Combined_Disability_Percentage",
+                    lpad(coalesce(when(col("CMBNED_DEGREE_DSBLTY")=="", lit('000')).otherwise(col("CMBNED_DEGREE_DSBLTY"))), 3, "0"))
         .withColumn("Veteran_ICN", lit(None).cast(StringType()))
         .withColumn("Applicant_Type", lit(None).cast(StringType()))
         .withColumn("Caregiver_Status", lit(None).cast(StringType()))
         .withColumn("Individual_Unemployability", lit(None).cast(StringType()))
         .withColumn("Status_Termination_Date", lit(None).cast(StringType()))
-        .withColumn("Status_Last_Update", lit(None).cast(StringType()))
         .withColumn("RecordLastUpdated", lit(None).cast(DateType()))
         .withColumn("Batch_CD", lit("SCD"))
         .withColumn("RecordStatus", lit(True).cast(BooleanType()))
-        .withColumn(
-            "Status_Begin_Date",
-            date_format(to_date(col("DSBL_DTR_DT"), "MMddyyyy"), "yyyyMMdd"),
-        )
-        .filter(col("Status_Begin_Date").isNotNull())
-        .selectExpr(
-            "participant_id",
-            "SC_Combined_Disability_Percentage",
-            "filename",
-            "SDP_Event_Created_Timestamp",
-            "sentToDoD",
-            "Veteran_ICN",
-            "Applicant_Type",
-            "Caregiver_Status",
-            "Individual_Unemployability",
-            "Status_Termination_Date",
-            "Status_Last_Update",
-            "RecordLastUpdated",
-            "Status_Begin_Date",
-            "RecordStatus",
-            "Batch_CD",
-        )
-    )
+        .withColumn("DSBL_DTR_DT",
+                    when(col("DSBL_DTR_DT") == "", None)
+                    .otherwise( date_format(to_date(col("DSBL_DTR_DT"), "MMddyyyy"), "yyyyMMdd")))
+    ).filter(col("DSBL_DTR_DT").isNotNull())
 
     Window_Spec = Window.partitionBy(scd_updates_df["participant_id"]).orderBy(
-        desc("Status_Begin_Date"), desc("SC_Combined_Disability_Percentage")
+        desc("DSBL_DTR_DT"), desc("SC_Combined_Disability_Percentage")
     )
 
-    lu_icn_relationship = icn_relationship.withColumnRenamed(
-        "participant_id", "lu_participant_id"
-    ).drop("va_profile_id", "record_updated_date")
+    edipi_df = (scd_updates_df.join(
+        icn_relationship, ["participant_id"], "left"
+    ).withColumn("rank", rank().over(Window_Spec))
+    .filter(col("rank") == 1)
+    .filter(col("ICN").isNotNull())
+    .dropDuplicates()
+    .drop("rank", "va_profile_id", "record_updated_date"))
 
-    with_edipi_df = scd_updates_df.join(
-        lu_icn_relationship,
-        scd_updates_df.participant_id == lu_icn_relationship.lu_participant_id,
-        "left",
-    )
-
-    with_edipi_df = (
-        with_edipi_df.withColumn("rank", rank().over(Window_Spec))
-        .filter(col("rank") == 1)
-        .filter(col("ICN").isNotNull())
-        .dropDuplicates()
-    )
-
-    with_edipi_df = with_edipi_df.drop("rank", "lu_participant_id")
-
-    edipi_df = with_edipi_df.select(
-        with_edipi_df.edipi,
-        with_edipi_df.ICN,
-        with_edipi_df.Veteran_ICN,
-        with_edipi_df.participant_id,
-        with_edipi_df.Batch_CD,
-        with_edipi_df.Applicant_Type,
-        with_edipi_df.Caregiver_Status,
-        lpad(
-            when(with_edipi_df.SC_Combined_Disability_Percentage == "", "000")
-            .otherwise(with_edipi_df.SC_Combined_Disability_Percentage)
-            .alias("SC_Combined_Disability_Percentage"),
-            3,
-            "0",
-        ).alias("SC_Combined_Disability_Percentage"),
-        with_edipi_df.Individual_Unemployability,
-        with_edipi_df.Status_Last_Update,
-        when(with_edipi_df.Status_Begin_Date == "", None)
-        .otherwise(with_edipi_df.Status_Begin_Date)
-        .alias("Status_Begin_Date"),
-        with_edipi_df.Status_Termination_Date,
-        with_edipi_df.SDP_Event_Created_Timestamp,
-        with_edipi_df.filename,
-        with_edipi_df.RecordLastUpdated,
-        with_edipi_df.RecordStatus,
-        with_edipi_df.sentToDoD,
-    )
     return edipi_df
+
+# COMMAND ----------
+
+
+# file_name = "dbfs:/mnt/ci-patronage/pai_landing/pt-indicator-6-6-24/WRTS_2024_42540_results_06052024.txt"
+# # file_creation_dateTime = row.dateTime
+# # print(f"Upserting records from {file_name}")
+
+# raw_pai_df = (
+#     spark.read.csv(file_name, header=True, inferSchema=True)
+#     .withColumn(
+#         "SDP_Event_Created_Timestamp",
+#         (col("_metadata.file_modification_time")).cast(TimestampType()),
+#     )
+#     .withColumn("filename", col("_metadata.file_path"))
+# )
+
+# file_creation_dateTime = (
+#     raw_pai_df.select("SDP_Event_Created_Timestamp").distinct().collect()[0][0]
+# )
+
+# # spark.sql("OPTIMIZE mypatronage_new ZORDER BY (SDP_Event_Created_Timestamp)")
+# targetTable = DeltaTable.forPath(spark, "dbfs:/user/hive/warehouse/mypatronage_new")
+# targetDF = (
+#     targetTable.toDF().filter("Batch_CD == 'SCD'").filter("RecordStatus=='True'")
+# )
+# targetDF = targetDF.select([col(c).alias(f"target_{c}") for c in targetDF.columns])
+
+# pai_df = raw_pai_df.selectExpr(
+#     "PTCPNT_VET_ID as participant_id", "PT_35_FLAG as source_PT_Indicator"
+# )
+# existing_pai_data_df = spark.sql(
+#     "SELECT participant_id, PT_Indicator from mypatronage_new where RecordStatus is True and Batch_CD = 'SCD'"
+# )
+
+# joinDF = (
+#     pai_df.join(
+#         targetDF,
+#         pai_df["participant_id"] == targetDF["target_participant_id"],
+#         "left",
+#     )
+#     .filter(targetDF["target_PT_Indicator"] == "N")
+#     .withColumn("filename", lit(file_name))
+#     .withColumn("SDP_Event_Created_Timestamp", lit(file_creation_dateTime))
+# )
+
+# filterDF = joinDF.filter(
+#     xxhash64(joinDF.source_PT_Indicator) != xxhash64(joinDF.target_PT_Indicator)
+# )
+
+# mergeDF = filterDF.withColumn("MERGEKEY", filterDF.target_ICN)
+
+# dummyDF = filterDF.filter("target_ICN is not null").withColumn(
+#     "MERGEKEY", lit(None)
+# )
+
+# paiDF = mergeDF.union(dummyDF)
+
+# edipi_df = (paiDF.selectExpr(
+#     "target_edipi as edipi",
+#     "participant_id",
+#     "MERGEKEY",
+#     "target_ICN as ICN",
+#     "target_SC_Combined_Disability_Percentage as SC_Combined_Disability_Percentage",
+#     "target_Status_Begin_Date as Status_Begin_Date",
+#     "target_Status_Last_Update as Status_Last_Update",
+#     "SDP_Event_Created_Timestamp",
+#     "filename","source_PT_Indicator"
+# ).withColumn("Veteran_ICN", lit(None))
+# .withColumn("Applicant_Type", lit(None))
+# .withColumn("Caregiver_Status", lit(None))
+# .withColumn("Batch_CD", lit("SCD"))
+# .withColumn("PT_Indicator", coalesce(col("source_PT_Indicator"), lit("N")))
+# .withColumn("Individual_Unemployability", lit(None))
+# .withColumn("Status_Termination_Date", lit(None))
+# .withColumn("RecordLastUpdated", lit(None))
+# )
+# df = process_updates(edipi_df, 'PAI')
+
+# COMMAND ----------
+
+
 
 # COMMAND ----------
 
@@ -648,6 +730,7 @@ def update_pai_data(row):
     Returns: None
     """
     file_name = row.path
+    file_creation_dateTime = row.dateTime
     print(f"Upserting records from {file_name}")
 
     raw_pai_df = (
@@ -659,11 +742,11 @@ def update_pai_data(row):
         .withColumn("filename", col("_metadata.file_path"))
     )
 
-    meta_raw_sdp = (
-        raw_pai_df.select("SDP_Event_Created_Timestamp").distinct().collect()[0][0]
-    )
+    # meta_raw_sdp = (
+    #     raw_pai_df.select("SDP_Event_Created_Timestamp").distinct().collect()[0][0]
+    # )
 
-    spark.sql("OPTIMIZE mypatronage_new ZORDER BY (SDP_Event_Created_Timestamp)")
+    # spark.sql("OPTIMIZE mypatronage_new ZORDER BY (SDP_Event_Created_Timestamp)")
     targetTable = DeltaTable.forPath(spark, "dbfs:/user/hive/warehouse/mypatronage_new")
     targetDF = (
         targetTable.toDF().filter("Batch_CD == 'SCD'").filter("RecordStatus=='True'")
@@ -671,7 +754,7 @@ def update_pai_data(row):
     targetDF = targetDF.select([col(c).alias(f"target_{c}") for c in targetDF.columns])
 
     pai_df = raw_pai_df.selectExpr(
-        "PTCPNT_VET_ID as participant_id", "PT_35_FLAG as PT_Indicator"
+        "PTCPNT_VET_ID as participant_id", "PT_35_FLAG as source_PT_Indicator"
     )
     existing_pai_data_df = spark.sql(
         "SELECT participant_id, PT_Indicator from mypatronage_new where RecordStatus is True and Batch_CD = 'SCD'"
@@ -685,11 +768,36 @@ def update_pai_data(row):
         )
         .filter(targetDF["target_PT_Indicator"] == "N")
         .withColumn("filename", lit(file_name))
-        .withColumn("SDP_Event_Created_Timestamp", lit(meta_raw_sdp))
+        .withColumn("SDP_Event_Created_Timestamp", lit(file_creation_dateTime))
     )
 
+    change_conditions = []
+    change_condition = when(
+                xxhash64(coalesce(col(source_PT_Indicator), lit("Null"))) != xxhash64(coalesce(col(target_PT_Indicator), lit("Null"))),
+                concat_ws(
+                    " ",
+                    lit(source_col),
+                    lit("old value:"),
+                    coalesce(col(target_col), lit("Null")),
+                    lit("changed to new value:"),
+                    coalesce(col(source_col), lit("Null"))
+                )
+            ).otherwise(lit(""))
+    change_conditions.append(change_condition)
+
+    joinDF = joinDF.withColumn("change_log", change_conditions)
+
+    new_record_condition = when(
+            col("target_icn").isNull(), 
+            lit("New Record")
+            ).otherwise(lit("Updated Record")
+            )
+
+    joinDF = joinDF.withColumn("RecordChangeStatus", new_record_condition)
+
+
     filterDF = joinDF.filter(
-        xxhash64(joinDF.PT_Indicator) != xxhash64(joinDF.target_PT_Indicator)
+        xxhash64(joinDF.source_PT_Indicator) != xxhash64(joinDF.target_PT_Indicator)
     )
 
     mergeDF = filterDF.withColumn("MERGEKEY", filterDF.target_ICN)
@@ -700,59 +808,26 @@ def update_pai_data(row):
 
     paiDF = mergeDF.union(dummyDF)
 
-    final_df = paiDF.selectExpr(
-        "target_edipi",
+    edipi_df = (paiDF.selectExpr(
+        "target_edipi as edipi",
         "participant_id",
         "MERGEKEY",
-        "target_ICN",
-        "target_RecordStatus",
-        "target_Batch_CD",
-        "target_SC_Combined_Disability_Percentage",
-        "PT_Indicator",
-        "target_Status_Begin_Date",
-        "target_Status_Last_Update",
+        "target_ICN as ICN",
+        "target_SC_Combined_Disability_Percentage as SC_Combined_Disability_Percentage",
+        "target_Status_Begin_Date as Status_Begin_Date",
+        "target_Status_Last_Update as Status_Last_Update",
         "SDP_Event_Created_Timestamp",
-        "target_RecordStatus",
-        "target_RecordLastUpdated",
-        "target_sentToDoD",
-        "filename",
+        "filename","source_PT_Indicator", "change_log", "RecordChangeStatus"
+    ).withColumn("Veteran_ICN", lit(None))
+    .withColumn("Applicant_Type", lit(None))
+    .withColumn("Caregiver_Status", lit(None))
+    .withColumn("Batch_CD", lit("SCD"))
+    .withColumn("PT_Indicator", coalesce(col("source_PT_Indicator"), lit("N")))
+    .withColumn("Individual_Unemployability", lit(None))
+    .withColumn("Status_Termination_Date", lit(None))
+    .withColumn("RecordLastUpdated", lit(None))
     )
-
-    targetTable.alias("target").merge(
-        final_df.alias("source"),
-        condition=(
-            "target.ICN = source.MERGEKEY and target.Batch_CD = 'SCD' and target.RecordStatus = True"
-        ),
-    ).whenMatchedUpdate(
-        set={
-            "RecordStatus": "False",
-            "RecordLastUpdated": "source.SDP_Event_Created_Timestamp",
-            "sentToDoD": "True",
-        }
-    ).whenNotMatchedInsert(
-        values={
-            "edipi": "source.target_edipi",
-            "ICN": "source.target_ICN",
-            "Veteran_ICN": lit(None),
-            "Applicant_Type": lit(None),
-            "Caregiver_Status": lit(None),
-            "participant_id": "source.participant_id",
-            "Batch_CD": lit("SCD"),
-            "SC_Combined_Disability_Percentage": "source.target_SC_Combined_Disability_Percentage",
-            "PT_Indicator": when(col("source.PT_Indicator").isNull(), "N").otherwise(
-                col("source.PT_Indicator")
-            ),
-            "Individual_Unemployability": lit(None),
-            "Status_Begin_Date": "source.target_Status_Begin_Date",
-            "Status_Last_Update": "source.target_Status_Last_Update",
-            "Status_Termination_Date": lit(None),
-            "SDP_Event_Created_Timestamp": "source.SDP_Event_Created_Timestamp",
-            "RecordStatus": "true",
-            "RecordLastUpdated": lit(None),
-            "sentToDoD": "false",
-            "filename": "source.filename",
-        }
-    ).execute()
+    return(edipi_df)
 
 # COMMAND ----------
 
@@ -776,16 +851,28 @@ def process_files(files_to_process_now):
             edipi_df = prepare_scd_data(row)
             process_updates(edipi_df, "SCD")
         elif "WRTS" in filename:
-            update_pai_data(row)
+            edipi_df = update_pai_data(row)
+            process_updates(edipi_df, "PAI")
         else:
             pass
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC describe mypatronage_new 
+
+# COMMAND ----------
+
+# %sql
+# alter table delta.`dbfs:/user/hive/warehouse/mypatronage_new`
+# add columns(RecordChangeStatus string)
 
 # COMMAND ----------
 
 # DBTITLE 1,Bundling everything (patronage())
 def patronage():
     spark.sql(
-        """ CREATE TABLE IF NOT EXISTS mypatronage_new (edipi string, ICN string, Veteran_ICN string, participant_id string, Batch_CD string,  Applicant_Type string, Caregiver_Status string, SC_Combined_Disability_Percentage string, PT_Indicator string, Individual_Unemployability string, Status_Begin_Date string, Status_Last_Update string, Status_Termination_Date string, SDP_Event_Created_Timestamp timestamp, filename string, RecordLastUpdated date, RecordStatus boolean, sentToDoD boolean) PARTITIONED BY(Batch_CD, RecordStatus ) LOCATION 'dbfs:/user/hive/warehouse/mypatronage_new' """
+        """ CREATE TABLE IF NOT EXISTS mypatronage_new (edipi string, ICN string, Veteran_ICN string, participant_id string, Batch_CD string,  Applicant_Type string, Caregiver_Status string, SC_Combined_Disability_Percentage string, PT_Indicator string, Individual_Unemployability string, Status_Begin_Date string, Status_Last_Update string, Status_Termination_Date string, SDP_Event_Created_Timestamp timestamp, filename string, RecordLastUpdated date, RecordStatus boolean, sentToDoD boolean, change_log string, RecordType string) PARTITIONED BY(Batch_CD, RecordStatus ) LOCATION 'dbfs:/user/hive/warehouse/mypatronage_new' """
     )
 
     file_counts = spark.sql(
@@ -797,6 +884,10 @@ def patronage():
         print("Loading seed file into delta table")
         seed_df = initialize_caregivers()
         process_updates(seed_df, "CG")
+        print("Loading required files for upsert")
+        files_to_process_now = collect_data_source()
+        print(f"Total files to process in this run: {files_to_process_now.count()}...")
+        process_files(files_to_process_now)
     else:
         print("Loading required files for upsert")
         files_to_process_now = collect_data_source()
@@ -807,6 +898,10 @@ def patronage():
 
 # DBTITLE 1,patronage() function
 patronage()
+
+# COMMAND ----------
+
+11918 + 17011
 
 # COMMAND ----------
 
@@ -851,275 +946,52 @@ display(remaining_files)
 
 # COMMAND ----------
 
-def process_updates(source_df, file_type):
-    """
-    Upserts the input dataframe depending on input file type ('CG' or 'SCD')
-    Parameters: Pyspark dataframe and file type
-    Returns: None
-    """
-    spark.sql("OPTIMIZE my_target_table ZORDER BY (SDP_Event_Created_Timestamp)")
 
-    targetTable = DeltaTable.forPath(spark, "dbfs:/user/hive/warehouse/my_target_table")
-    targetDF = targetTable.toDF().filter(
-        (col("Batch_CD") == file_type) & (col("RecordStatus") == True)
-    )
-    targetDF = targetDF.select([col(c).alias(f"target_{c}") for c in targetDF.columns])
-
-    if file_type == "CG":
-        join_with_target_condition = (
-            (source_df.ICN == targetDF.target_ICN)
-            & (source_df.Veteran_ICN == targetDF.target_Veteran_ICN)
-            & (source_df.Batch_CD == targetDF.target_Batch_CD)
-            & (source_df.Applicant_Type == targetDF.target_Applicant_Type)
-            & (targetDF.target_RecordStatus == "True")
-        )
-    elif file_type in ["SCD"]:
-        join_with_target_condition = (
-            (source_df.ICN == targetDF.target_ICN)
-            & (
-                targetDF.target_RecordStatus == "True"
-            )  
-            & (source_df.Batch_CD == targetDF.target_Batch_CD)
-        )
-
-    joinDF = source_df.join(targetDF, join_with_target_condition, "leftouter")
-
-    if file_type == "SCD":
-        joinDF = (
-            joinDF.withColumn(
-                "Status_Last_Update",
-                when(
-                    (
-                        (col("target_participant_id") != (col("participant_id")))
-                        & (col("Status_Last_Update").isNull())
-                    ),
-                    None,
-                ).otherwise(col("Status_Begin_Date")),
-            )
-            .withColumn(
-                "Updated_Status_Begin_Date",
-                when(
-                    (
-                        (
-                            xxhash64(col("Status_Begin_Date"))
-                            != xxhash64(col("target_Status_Begin_Date"))
-                        )
-                        & col("target_Status_Begin_Date").isNotNull()
-                    ),
-                    col("target_Status_Begin_Date"),
-                ).otherwise(col("Status_Begin_Date")),
-            )
-            .drop("Status_Begin_Date")
-            .withColumnRenamed("Updated_Status_Begin_Date", "Status_Begin_Date")
-            .withColumn(
-                "PT_Indicator", coalesce(joinDF["target_PT_Indicator"], lit("N"))
-            )
-        )
-
-    if file_type == "CG":
-        delta_condition = xxhash64(
-            joinDF.Status_Begin_Date,
-            joinDF.Status_Termination_Date,
-            joinDF.Applicant_Type,
-            joinDF.Caregiver_Status,
-        ) != xxhash64(
-            joinDF.target_Status_Begin_Date,
-            joinDF.target_Status_Termination_Date,
-            joinDF.target_Applicant_Type,
-            joinDF.target_Caregiver_Status,
-        )
-    elif file_type == "SCD":
-        delta_condition = xxhash64(
-            joinDF.SC_Combined_Disability_Percentage
-        ) != xxhash64(joinDF.target_SC_Combined_Disability_Percentage)
-
-    filterDF = joinDF.filter(delta_condition)
-
-    if file_type == "CG":
-        concat_column = concat(
-            filterDF.ICN, filterDF.Veteran_ICN, filterDF.Applicant_Type
-        )
-    elif file_type == "SCD":
-        concat_column = filterDF.ICN
-
-    mergeDF = filterDF.withColumn("MERGEKEY", concat_column)
-
-    dummyDF = filterDF.filter(col("target_ICN").isNotNull()).withColumn(
-        "MERGEKEY", lit(None)
-    )
-
-    upsert_df = mergeDF.union(dummyDF)
-
-    if file_type == "CG":
-        batch_cd = "CG"
-        merge_condition = "concat(target.ICN, target.Veteran_ICN, target.Applicant_Type) = source.MERGEKEY and target.RecordStatus = True"
-    else:
-        batch_cd = "SCD"
-        merge_condition = "((target.ICN = source.MERGEKEY) and (target.Batch_CD = source.Batch_CD) and (target.RecordStatus = True))"
-
-    targetTable = DeltaTable.forPath(spark, "dbfs:/user/hive/warehouse/my_target_table")
-
-    targetDF = targetTable.toDF().filter(
-        (col("Batch_CD") == batch_cd) & (col("RecordStatus") == True)
-    )
-
-    targetTable.alias("target").merge(
-        upsert_df.alias("source"),
-        condition=merge_condition,
-    ).whenMatchedUpdate(
-        set={
-            "RecordStatus": "False",
-            "RecordLastUpdated": "source.SDP_Event_Created_Timestamp",
-            "sentToDoD": "true",
-        }
-    ).whenNotMatchedInsert(
-        values={
-            "edipi": "source.edipi",
-            "ICN": "source.ICN",
-            "Veteran_ICN": "source.Veteran_ICN",
-            "Applicant_Type": "source.Applicant_Type",
-            "Caregiver_Status": "source.Caregiver_Status",
-            "participant_id": "source.participant_id",
-            "Batch_CD": "source.Batch_CD",
-            "SC_Combined_Disability_Percentage": "source.SC_Combined_Disability_Percentage",
-            "PT_Indicator": "source.PT_Indicator",
-            "Individual_Unemployability": "source.Individual_Unemployability",
-            "Status_Begin_Date": "source.Status_Begin_Date",
-            "Status_Last_Update": "source.Status_Last_Update",
-            "Status_Termination_Date": "source.Status_Termination_Date",
-            "SDP_Event_Created_Timestamp": "source.SDP_Event_Created_Timestamp",
-            "RecordStatus": "true",
-            "RecordLastUpdated": "source.RecordLastUpdated",
-            "filename": "source.filename",
-            "sentToDoD": "false",
-        }
-    ).execute()
 
 # COMMAND ----------
 
-from pyspark.sql.functions import col, when, xxhash64, coalesce, lit, concat
-from delta.tables import DeltaTable
+# spark.sql("drop table mypatronage_new")
+# dbutils.fs.rm('dbfs:/user/hive/warehouse/mypatronage_new', True)
 
-def process_updates(source_df, file_type):
-    """
-    Upserts the input dataframe depending on input file type ('CG' or 'SCD')
-    Parameters: Pyspark dataframe and file type
-    Returns: None
-    """
-    # Optimize the target table before the merge
-    spark.sql("OPTIMIZE my_target_table ZORDER BY (SDP_Event_Created_Timestamp)")
+# COMMAND ----------
 
-    # Load the target table and filter based on file type and RecordStatus
-    targetTable = DeltaTable.forPath(spark, "dbfs:/user/hive/warehouse/my_target_table")
-    targetDF = targetTable.toDF().filter(
-        (col("Batch_CD") == file_type) & (col("RecordStatus") == True)
-    ).select([col(c).alias(f"target_{c}") for c in targetDF.columns])
+# MAGIC %sql
+# MAGIC SELECT
+# MAGIC caregiver_status, count(case when recordstatus IS TRUE and batch_cd = 'CG'  then 1 end)
+# MAGIC from mypatronage_new WHERE batch_cd = 'CG'
+# MAGIC group by 1
 
-    # Define the join condition based on the file type
-    common_join_condition = (
-        (source_df.ICN == targetDF.target_ICN) &
-        (source_df.Batch_CD == targetDF.target_Batch_CD)
-    )
-    
-    if file_type == "CG":
-        join_condition = common_join_condition & (
-            (source_df.Veteran_ICN == targetDF.target_Veteran_ICN) &
-            (source_df.Applicant_Type == targetDF.target_Applicant_Type)
-        )
-    elif file_type == "SCD":
-        join_condition = common_join_condition
+# COMMAND ----------
 
-    # Perform the left outer join
-    joinDF = source_df.join(targetDF, join_condition, "leftouter")
+# MAGIC %sql
+# MAGIC select * from mypatronage_new where mypatronage_new.SDP_Event_Created_Timestamp >= '2024-10-05' and recordstatus =true and batch_cd = 'SCD'
 
-    # Process SCD-specific transformations
-    if file_type == "SCD":
-        joinDF = (
-            joinDF.withColumn(
-                "Updated_Status_Begin_Date",
-                when(
-                    xxhash64(col("Status_Begin_Date")) != xxhash64(col("target_Status_Begin_Date")),
-                    col("target_Status_Begin_Date")
-                ).otherwise(col("Status_Begin_Date"))
-            )
-            .drop("Status_Begin_Date")
-            .withColumnRenamed("Updated_Status_Begin_Date", "Status_Begin_Date")
-            .withColumn("PT_Indicator", coalesce(joinDF["target_PT_Indicator"], lit("N")))
-        )
+# COMMAND ----------
 
-    # Define the delta condition for each file type
-    if file_type == "CG":
-        delta_condition = xxhash64(
-            joinDF.Status_Begin_Date,
-            joinDF.Status_Termination_Date,
-            joinDF.Applicant_Type,
-            joinDF.Caregiver_Status
-        ) != xxhash64(
-            joinDF.target_Status_Begin_Date,
-            joinDF.target_Status_Termination_Date,
-            joinDF.target_Applicant_Type,
-            joinDF.target_Caregiver_Status
-        )
-    elif file_type == "SCD":
-        delta_condition = xxhash64(joinDF.SC_Combined_Disability_Percentage) != xxhash64(joinDF.target_SC_Combined_Disability_Percentage)
+# MAGIC %sql
+# MAGIC select * from mypatronage_new where icn in 
+# MAGIC (SELECT ICN FROM mypatronage_new
+# MAGIC except
+# MAGIC SElect ICN from DELTA.`/mnt/Patronage/SCD_Staging`)
 
-    # Filter based on delta condition
-    filterDF = joinDF.filter(delta_condition)
+# COMMAND ----------
 
-    # Create the merge key based on file type
-    if file_type == "CG":
-        concat_column = concat(filterDF.ICN, filterDF.Veteran_ICN, filterDF.Applicant_Type)
-    elif file_type == "SCD":
-        concat_column = filterDF.ICN
+# MAGIC %sql
+# MAGIC SElect * from DELTA.`/mnt/Patronage/SCD_Staging` where icn in (SElect ICN from DELTA.`/mnt/Patronage/SCD_Staging`
+# MAGIC except
+# MAGIC SELECT ICN FROM mypatronage_new
+# MAGIC )
 
-    # Add merge key column
-    mergeDF = filterDF.withColumn("MERGEKEY", concat_column)
+# COMMAND ----------
 
-    # Handle dummy records for unmatched targets
-    dummyDF = filterDF.filter(col("target_ICN").isNotNull()).withColumn("MERGEKEY", lit(None))
+# MAGIC %sql
+# MAGIC select * from mypatronage_new where ICN in (SElect ICN from DELTA.`/mnt/Patronage/SCD_Staging` where icn in (SElect ICN from DELTA.`/mnt/Patronage/SCD_Staging`)
+# MAGIC except
+# MAGIC SELECT ICN FROM mypatronage_new)
+# MAGIC
 
-    # Union the dataframes
-    upsert_df = mergeDF.union(dummyDF)
+# COMMAND ----------
 
-    # Define merge conditions and batch codes
-    if file_type == "CG":
-        merge_condition = """
-            concat(target.ICN, target.Veteran_ICN, target.Applicant_Type) = source.MERGEKEY 
-            AND target.RecordStatus = True
-        """
-    else:
-        merge_condition = """
-            target.ICN = source.MERGEKEY 
-            AND target.Batch_CD = source.Batch_CD 
-            AND target.RecordStatus = True
-        """
-
-    # Perform the merge operation
-    targetTable.alias("target").merge(
-        upsert_df.alias("source"),
-        merge_condition
-    ).whenMatchedUpdate(set={
-        "RecordStatus": "False",
-        "RecordLastUpdated": "source.SDP_Event_Created_Timestamp",
-        "sentToDoD": "true"
-    }).whenNotMatchedInsert(values={
-        "edipi": "source.edipi",
-        "ICN": "source.ICN",
-        "Veteran_ICN": "source.Veteran_ICN",
-        "Applicant_Type": "source.Applicant_Type",
-        "Caregiver_Status": "source.Caregiver_Status",
-        "participant_id": "source.participant_id",
-        "Batch_CD": "source.Batch_CD",
-        "SC_Combined_Disability_Percentage": "source.SC_Combined_Disability_Percentage",
-        "PT_Indicator": "source.PT_Indicator",
-        "Individual_Unemployability": "source.Individual_Unemployability",
-        "Status_Begin_Date": "source.Status_Begin_Date",
-        "Status_Last_Update": "source.Status_Last_Update",
-        "Status_Termination_Date": "source.Status_Termination_Date",
-        "SDP_Event_Created_Timestamp": "source.SDP_Event_Created_Timestamp",
-        "RecordStatus": "true",
-        "RecordLastUpdated": "source.RecordLastUpdated",
-        "filename": "source.filename",
-        "sentToDoD": "false"
-    }).execute()
-
+# MAGIC %sql
+# MAGIC SELECT 
+# MAGIC ICN from DELTA.`/mnt/Patronage/SCD_Staging` where icn = 1006434134
