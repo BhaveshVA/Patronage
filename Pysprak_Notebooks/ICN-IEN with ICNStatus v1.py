@@ -150,6 +150,14 @@ unique_icn = (filtered_df
 
 # COMMAND ----------
 
+raw_psa_df.filter(col("TreatingFacilityPersonIdentifier")== '5348444').filter(raw_psa_df["MVITreatingFacilityInstitutionSID"].isin([5667, 6061, 6722])).display()
+
+# COMMAND ----------
+
+multiple_tfpi.filter(col("icn")=='1010124988').display()
+
+# COMMAND ----------
+
 dod_df = (non_duplicates
         .filter(
         (non_duplicates["MVIInstitutionSID"] == 5667)
@@ -193,7 +201,7 @@ master_df.display()
 
 # COMMAND ----------
 
-input_value = [1000669101, 24116350, 1082816891]
+input_value = [5348444]
 result_df = get_any_id(df, input_value)
 display(result_df)
 
@@ -251,6 +259,21 @@ master_df.count()
 # MAGIC   cast(operationMetrics.numTargetRowsUpdated as INT) as Updates  
 # MAGIC FROM
 # MAGIC   (describe history test_correlations)
+# MAGIC where
+# MAGIC   operation not in ("CREATE TABLE", "OPTIMIZE")
+# MAGIC order by
+# MAGIC   1 desc;
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT
+# MAGIC   version,
+# MAGIC   operation,
+# MAGIC   cast(operationMetrics.numTargetRowsInserted as INT) as Inserted,
+# MAGIC   cast(operationMetrics.numTargetRowsUpdated as INT) as Updates  
+# MAGIC FROM
+# MAGIC   (describe history DELTA.`dbfs:/mnt/Patronage/identity_correlations`)
 # MAGIC where
 # MAGIC   operation not in ("CREATE TABLE", "OPTIMIZE")
 # MAGIC order by
@@ -354,7 +377,7 @@ def get_any_id(df, input_value):
 
 # COMMAND ----------
 
-input_value = [1000669101, 24116350, 1082816891]
+input_value = [5348444, 1010124988, 1019267760]
 df = spark.table('test_correlations')
 df = df.drop("Last_updated_date")
 result_df = get_any_id(df, input_value)
@@ -402,7 +425,8 @@ display(result_df)
 
 # COMMAND ----------
 
-
+# MAGIC %sql
+# MAGIC select * from not_in_josh
 
 # COMMAND ----------
 
@@ -475,4 +499,4 @@ Institutions.select("MVIInstitutionIEN", "MVIFacilityTypeIEN", "InstitutionName"
 
 # COMMAND ----------
 
-
+multiple_tfpi.filter(col("icn")=='1010124988').display()
