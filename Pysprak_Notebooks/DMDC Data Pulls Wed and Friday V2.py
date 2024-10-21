@@ -49,28 +49,28 @@ def get_last_run_date():
 
 # %sql
 # create or replace temp view ttemp_view as 
-# select rpad(nvl(EDIPI,""),10," " ) ||
-#             rpad(nvl(Batch_CD,""), 3," ") ||  
-#             rpad(nvl(SC_Combined_Disability_Percentage,""),3," ") ||
-#             rpad(nvl(date_format(status_begin_date, 'yyyyMMdd'),""),8," ") ||
-#             rpad(nvl(PT_Indicator,""),1," ") ||
-#             rpad(nvl(Individual_Unemployability,""),1," ") ||  
-#             rpad(nvl(date_format(Status_Last_Update, 'yyyyMMdd'),""),8," ") ||
-#             rpad(nvl(date_format(Status_Termination_Date, 'yyyyMMdd'),""),8," ") as CG  
+# select rpad(coalesce(EDIPI,""),10," " ) ||
+#             rpad(coalesce(Batch_CD,""), 3," ") ||  
+#             rpad(coalesce(SC_Combined_Disability_Percentage,""),3," ") ||
+#             rpad(coalesce(date_format(status_begin_date, 'yyyyMMdd'),""),8," ") ||
+#             rpad(coalesce(PT_Indicator,""),1," ") ||
+#             rpad(coalesce(Individual_Unemployability,""),1," ") ||  
+#             rpad(coalesce(date_format(Status_Last_Update, 'yyyyMMdd'),""),8," ") ||
+#             rpad(coalesce(date_format(Status_Termination_Date, 'yyyyMMdd'),""),8," ") as CG  
 #         from cg_data
 #         where SDP_Event_Created_Timestamp >= '2024-10-11' --'yyyy-mm-dd'
 #         and Applicant_Type = 'Primary Caregiver'
 #         and (Status_Termination_Date is NULL OR Status_Termination_Date >= curdate()  OR Status IN ("Approved", "Pending Revocation/Discharge"))
 #         and EDIPI is not null
 # union all
-#         select rpad(nvl(edipi,""),10," " ) ||
-#             rpad(nvl(Batch_CD,""), 3," ") ||
-#             rpad(nvl(SC_Combined_Disability_Percentage,""),3," ") ||
-#             rpad(nvl(Status_Begin_Date,""),8," ") ||
-#             rpad(nvl(PT_Indicator,""),1," ") ||
-#             rpad(nvl(Individual_Unemployability,""),1," ") ||
-#             rpad(nvl(Status_Last_Update,""),8," ") ||
-#             rpad(nvl(Status_Termination_Date,""),8," ") as CG
+#         select rpad(coalesce(edipi,""),10," " ) ||
+#             rpad(coalesce(Batch_CD,""), 3," ") ||
+#             rpad(coalesce(SC_Combined_Disability_Percentage,""),3," ") ||
+#             rpad(coalesce(Status_Begin_Date,""),8," ") ||
+#             rpad(coalesce(PT_Indicator,""),1," ") ||
+#             rpad(coalesce(Individual_Unemployability,""),1," ") ||
+#             rpad(coalesce(Status_Last_Update,""),8," ") ||
+#             rpad(coalesce(Status_Termination_Date,""),8," ") as CG
 #         from scd_data
 #         where SDP_Event_Created_Timestamp >= '2024-10-11'
 #         and edipi is not null
@@ -93,29 +93,30 @@ def get_last_run_date():
 # DBTITLE 1,This function will pull data based on the last run date
 def get_data(last_run_date_str):
     cg_query = f"""
-        select rpad(nvl(EDIPI,""),10," " ) ||
-            rpad(nvl(Batch_CD,""), 3," ") ||  
-            rpad(nvl(SC_Combined_Disability_Percentage,""),3," ") ||
-            rpad(nvl(date_format(status_begin_date, 'yyyyMMdd'),""),8," ") ||
-            rpad(nvl(PT_Indicator,""),1," ") ||
-            rpad(nvl(Individual_Unemployability,""),1," ") ||  
-            rpad(nvl(date_format(Status_Last_Update, 'yyyyMMdd'),""),8," ") ||
-            rpad(nvl(date_format(Status_Termination_Date, 'yyyyMMdd'),""),8," ") as CG  
+        select rpad(coalesce(EDIPI,""),10," " ) ||
+            rpad(coalesce(Batch_CD,""), 3," ") ||  
+            rpad(coalesce(SC_Combined_Disability_Percentage,""),3," ") ||
+            rpad(coalesce(date_format(status_begin_date, 'yyyyMMdd'),""),8," ") ||
+            rpad(coalesce(PT_Indicator,""),1," ") ||
+            rpad(coalesce(Individual_Unemployability,""),1," ") ||  
+            rpad(coalesce(date_format(Status_Last_Update, 'yyyyMMdd'),""),8," ") ||
+            rpad(coalesce(date_format(Status_Termination_Date, 'yyyyMMdd'),""),8," ") as CG  
         from cg_data
         where SDP_Event_Created_Timestamp >= DATE('{last_run_date_str}') --'yyyy-mm-dd'
         and Applicant_Type = 'Primary Caregiver'
-        and (Status_Termination_Date is NULL OR Status_Termination_Date >= curdate()  OR Status IN ("Approved", "Pending Revocation/Discharge"))
+        and (Status_Termination_Date is NULL OR Status_Termination_Date >= curdate()
+            OR Status IN ("Approved", "Pending Revocation/Discharge"))
         and EDIPI is not null
         """
     scd_query = f"""
-        select rpad(nvl(edipi,""),10," " ) ||
-            rpad(nvl(Batch_CD,""), 3," ") ||
-            rpad(nvl(SC_Combined_Disability_Percentage,""),3," ") ||
-            rpad(nvl(Status_Begin_Date,""),8," ") ||
-            rpad(nvl(PT_Indicator,""),1," ") ||
-            rpad(nvl(Individual_Unemployability,""),1," ") ||
-            rpad(nvl(Status_Last_Update,""),8," ") ||
-            rpad(nvl(Status_Termination_Date,""),8," ") as CG
+        select rpad(coalesce(edipi,""),10," " ) ||
+            rpad(coalesce(Batch_CD,""), 3," ") ||
+            rpad(coalesce(SC_Combined_Disability_Percentage,""),3," ") ||
+            rpad(coalesce(Status_Begin_Date,""),8," ") ||
+            rpad(coalesce(PT_Indicator,""),1," ") ||
+            rpad(coalesce(Individual_Unemployability,""),1," ") ||
+            rpad(coalesce(Status_Last_Update,""),8," ") ||
+            rpad(coalesce(Status_Termination_Date,""),8," ") as CG
         from scd_data
         where SDP_Event_Created_Timestamp >= DATE('{last_run_date_str}')
         and edipi is not null
@@ -153,6 +154,6 @@ write_to_patronage(sql_query)
 
 # COMMAND ----------
 
-last_run_date_str = get_last_run_date()
-a = get_data(last_run_date_str)
-print(a)
+# last_run_date_str = get_last_run_date()
+# a = get_data(last_run_date_str)
+# print(a)
