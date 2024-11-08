@@ -28,65 +28,17 @@ scd_data.createOrReplaceTempView('scd_data')
 # DBTITLE 1,This function will calculate last run date based on today's day of the week
 def get_last_run_date():
     if todays_date.weekday() == 2: # Wednesday
-        last_run_date = todays_date - timedelta(days=5) # last Friday
+        last_run_date = todays_date - timedelta(days=5) # 5 for last Friday
         last_run_date_str = last_run_date.strftime('%Y-%m-%d')
         # print("Last Run Date:", last_run_date_str)
     elif todays_date.weekday() == 4: # Friday
-        last_run_date = todays_date - timedelta(days=2) # last Wednesday
+        last_run_date = todays_date - timedelta(days=2) # 2 for last Wednesday
         last_run_date_str = last_run_date.strftime('%Y-%m-%d')
         # print("Last Run Date:", last_run_date_str)
     else:
         raise ValueError("Todays_date is neither Wednesday nor Friday")
     # print("Last Run Date:", last_run_date_str)
     return last_run_date_str
-
-# COMMAND ----------
-
-# temp_dt = get_last_run_date()
-# temp_dt
-
-# COMMAND ----------
-
-# %sql
-# create or replace temp view ttemp_view as 
-# select rpad(coalesce(EDIPI,""),10," " ) ||
-#             rpad(coalesce(Batch_CD,""), 3," ") ||  
-#             rpad(coalesce(SC_Combined_Disability_Percentage,""),3," ") ||
-#             rpad(coalesce(date_format(status_begin_date, 'yyyyMMdd'),""),8," ") ||
-#             rpad(coalesce(PT_Indicator,""),1," ") ||
-#             rpad(coalesce(Individual_Unemployability,""),1," ") ||  
-#             rpad(coalesce(date_format(Status_Last_Update, 'yyyyMMdd'),""),8," ") ||
-#             rpad(coalesce(date_format(Status_Termination_Date, 'yyyyMMdd'),""),8," ") as CG  
-#         from cg_data
-#         where SDP_Event_Created_Timestamp >= '2024-10-11' --'yyyy-mm-dd'
-#         and Applicant_Type = 'Primary Caregiver'
-#         and (Status_Termination_Date is NULL OR Status_Termination_Date >= curdate()  OR Status IN ("Approved", "Pending Revocation/Discharge"))
-#         and EDIPI is not null
-# union all
-#         select rpad(coalesce(edipi,""),10," " ) ||
-#             rpad(coalesce(Batch_CD,""), 3," ") ||
-#             rpad(coalesce(SC_Combined_Disability_Percentage,""),3," ") ||
-#             rpad(coalesce(Status_Begin_Date,""),8," ") ||
-#             rpad(coalesce(PT_Indicator,""),1," ") ||
-#             rpad(coalesce(Individual_Unemployability,""),1," ") ||
-#             rpad(coalesce(Status_Last_Update,""),8," ") ||
-#             rpad(coalesce(Status_Termination_Date,""),8," ") as CG
-#         from scd_data
-#         where SDP_Event_Created_Timestamp >= '2024-10-11'
-#         and edipi is not null
-
-# COMMAND ----------
-
-# %sql
-# select count(*), 'not_42' from ttemp_view
-# where len(cg) = 42
-
-# COMMAND ----------
-
-# %sql
-# select * from ttemp_view
-
-
 
 # COMMAND ----------
 
@@ -118,7 +70,8 @@ def get_data(last_run_date_str):
             rpad(coalesce(Status_Last_Update,""),8," ") ||
             rpad(coalesce(Status_Termination_Date,""),8," ") as CG
         from scd_data
-        where SDP_Event_Created_Timestamp >= DATE('{last_run_date_str}')
+        where SDP_Event_Created_Timestamp >= DATE('{last_run_date_str}') 
+        and SDP_Event_Created_Timestamp <= DATE(current_date())
         and edipi is not null
         """
     combined_data = f"""
@@ -144,16 +97,3 @@ def write_to_patronage(combined_data):
     print(f'Number of records: {len(pandas_df)}')
     # display(pandas_df)
     print(pandas_df.to_string())
-
-# COMMAND ----------
-
-last_run_date_str = get_last_run_date()
-print(f"Last export on: {datetime.strptime(last_run_date_str, '%Y-%m-%d').strftime('%A')}, {last_run_date_str}")
-sql_query = get_data(last_run_date_str)
-write_to_patronage(sql_query)
-
-# COMMAND ----------
-
-# last_run_date_str = get_last_run_date()
-# a = get_data(last_run_date_str)
-# print(a)
