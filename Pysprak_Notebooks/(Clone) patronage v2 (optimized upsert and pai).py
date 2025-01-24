@@ -11,6 +11,16 @@ import pandas as pd
 
 # COMMAND ----------
 
+
+df = spark.read.format('delta').load("dbfs:/mnt/vac20sdpasa201vba/ci-vba-edw-2/DeltaTables/DW_ADHOC_RECURR.DOD_PATRONAGE_SCD_PT/")
+df.display()
+
+# COMMAND ----------
+
+display(dbutils.fs.ls("dbfs:/mnt/vac20sdpasa201vba/ci-vba-edw-2/DeltaTables/DW_ADHOC_RECURR.DOD_PATRONAGE_SCD_PT/"))
+
+# COMMAND ----------
+
 # DBTITLE 1,Define Schemas
 # old_cg_schema = StructType(
 #     [
@@ -132,7 +142,7 @@ file_list_schema = StructType(
 icn_relationship = (spark.read.format("delta")
                     .load("/mnt/Patronage/identity_correlations")
                     .withColumnRenamed('MVIPersonICN', 'ICN')).persist()
-
+                    
 
 # COMMAND ----------
 
@@ -201,7 +211,7 @@ concat_column = {
 
 # COMMAND ----------
 
-# DBTITLE 1,Helper function to list required source files (list_files_recursive(path))
+# DBTITLE 1,Helper function to list required source files (all_file_list(path))
 def list_files_recursive(path, cg_unix_start_time):
     """
     Recursively lists files at any depth inside a directory based on filtering criteria.
@@ -227,22 +237,21 @@ def list_files_recursive(path, cg_unix_start_time):
                 and item.name.endswith(".csv")
                 and "NEW" not in item.name
             )
-            or (item.name.startswith("WRTS") and item.name.endswith(".txt"))
             or (
-                item.path.startswith("dbfs:/mnt/vac20sdpasa201vba/ci-vba-edw-2/")
-                and item.name.endswith("parquet")
+                item.name.startswith("WRTS") and item.name.endswith(".txt")
             )
         )
     ]
 
     subdir_files = [
         list_files_recursive(item.path, cg_unix_start_time)
-        for item in items
-        if item.isDir()
+        for item in items if item.isDir()
     ]
 
     # Flatten nested lists from subdirectories
     return files + [file for sublist in subdir_files for file in sublist]
+
+
 
 # COMMAND ----------
 
@@ -296,7 +305,7 @@ def collect_data_source():
         SELECT COALESCE(MAX(SDP_Event_Created_Timestamp), TIMESTAMP('{others_unix_start_time}')) AS max_date from mypatronage_test
         """
     )
-
+    # no_of_files = 1
     max_processed_date = (
         datetime.fromtimestamp(others_unix_start_time/1000)
         if no_of_files == 1
@@ -304,27 +313,22 @@ def collect_data_source():
     )
 
     now = datetime.now()
-    yesterday_end_time = (datetime(now.year, now.month, now.day) - timedelta(hours=4)) #Need to adjust to blob storage time
+    yesterday_end_time = (datetime(now.year, now.month, now.day) - timedelta(hours=4))
     yesterday_end_time_ts = int(yesterday_end_time.timestamp() * 1000)
 
-    final_file_list_df = filtered_file_list_df.filter(
+    files_to_process_now = filtered_file_list_df.filter(
         (col("dateTime") > max_processed_date)
         & (col("modificationTime") <= yesterday_end_time_ts)
     )
 
-    parquet_PT_flag = final_file_list_df.filter(final_file_list_df['path'].contains('parquet')).orderBy(desc(col("modificationTime"))).limit(1)
-
-    all_other_files = final_file_list_df.filter(~final_file_list_df['path'].contains('parquet'))
-
-    files_to_process_now = all_other_files.unionAll(parquet_PT_flag)
     print(
         f"Upserting all files landed between date: {max_processed_date} and date: {yesterday_end_time}"
     )
 
     if files_to_process_now.count() > 0:
-        return files_to_process_now.orderBy(col("modificationTime"))
+        return files_to_process_now
     else:
-        dbutils.notebook.exit("Notebook exited because there are no files to upsert.")
+        # dbutils.notebook.exit("Notebook exited because there are no files to upsert.")
         pass
         # return None
 
@@ -442,7 +446,7 @@ def process_updates(edipi_df, file_type):
     upsert_df = upsert_df.withColumn("RecordChangeStatus", new_record_condition)
 
     if len(change_conditions) > 0:
-        change_log_col = concat_ws(" ", *[coalesce(cond, lit("")) for cond in change_conditions])
+        change_log_col = concat_ws(". ", *[coalesce(cond, lit("")) for cond in change_conditions])
     else:
         change_log_col = lit("")
 
@@ -596,29 +600,24 @@ def prepare_scd_data(row):
 # COMMAND ----------
 
 # DBTITLE 1,Prepare PAI data (update_pai_data())
-def update_pai_data(row, source_type):
+def update_pai_data(row):
     """
     Prepares PT Indicator from the input row, transforms and updates a Veteran's PT_Indicator column in delta table. 
     Parameters: Row of data from pyspark dataframe with filename and metadata that are not processed (upsert)
     Returns: Dataframe: Dataframe with required column names ready for upsert
     """
+    file_name = row.path
+    file_creation_dateTime = row.dateTime
+    print(f"Upserting records from {file_name}")
 
-    if source_type == 'text':
-        file_name = row.path
-        file_creation_dateTime = row.dateTime 
-        raw_pai_df = (
+    raw_pai_df = (
         spark.read.csv(file_name, header=True, inferSchema=True)
         .withColumn(
             "SDP_Event_Created_Timestamp",
             (col("_metadata.file_modification_time")).cast(TimestampType()),
         )
-        .withColumn("filename", col("_metadata.file_path")))
-    elif source_type == 'table':
-        file_creation_dateTime = row.dateTime
-        file_name = f"Updated from PA&I delta table on {file_creation_dateTime}"
-        raw_pai_df = (spark.sql(""" SELECT * FROM DELTA.`/mnt/vac20sdpasa201vba/ci-vba-edw-2/DeltaTables/DW_ADHOC_RECURR.DOD_PATRONAGE_SCD_PT/` """))
-
-    print(f"Updating PT Indicator")
+        .withColumn("filename", col("_metadata.file_path"))
+    )
 
     targetTable = DeltaTable.forPath(spark, "dbfs:/user/hive/warehouse/mypatronage_test")
     targetDF = (
@@ -693,22 +692,16 @@ def process_files(files_to_process_now):
     process_updates(edipi_df, "CG")
     # display(cg_csv_files)
 
-    other_files = files_to_process_now.filter(~files_to_process_now['path'].contains('caregiverevent'))
-    other_rows = other_files.collect()
+    remaining_files = files_to_process_now.filter(~files_to_process_now['path'].contains('caregiverevent'))
+    rows = remaining_files.collect()
 
-    for row in other_rows:
+    for row in rows:
         filename = row.path
         if "CPIDODIEX" in filename:
-            print(f"Now processing: {row.path}")
             edipi_df = prepare_scd_data(row)
             process_updates(edipi_df, "SCD")
         elif "WRTS" in filename:
-            print(f"Now processing: {row.path}")
-            edipi_df = update_pai_data(row, "text")
-            process_updates(edipi_df, "PAI")
-        elif 'parquet' in filename:
-            print(f"Now processing: {row.path}")
-            edipi_df = update_pai_data(row, "table")
+            edipi_df = update_pai_data(row)
             process_updates(edipi_df, "PAI")
         else:
             pass
@@ -764,16 +757,15 @@ display(files_to_process_now)
 
 # COMMAND ----------
 
-remaining_files = files_to_process_now.filter(files_to_process_now['path'].contains('parquet'))
-file_creation_dateTime = remaining_files.select(max("dateTime")).collect()[0][0]
-print((file_creation_dateTime))
+remaining_files = files_to_process_now.filter(~files_to_process_now['path'].contains('caregiverevent'))
+display(remaining_files)
 
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC SELECT count(*)
+# MAGIC SELECT *
 # MAGIC FROM mypatronage_test
-# MAGIC where ICN NOT RLIKE '^[0-9]'
+# MAGIC where ICN not RLIKE '^[0-9]'
 
 # COMMAND ----------
 
@@ -794,19 +786,76 @@ print((file_creation_dateTime))
 
 # COMMAND ----------
 
+# MAGIC %sql
+# MAGIC SELECT COUNT(*)
+# MAGIC FROM DELTA.`/mnt/Patronage/Caregivers_Staging_New`
+# MAGIC WHERE 
+# MAGIC -- recordstatus is TRUE 
+# MAGIC -- AND 
+# MAGIC EDIPI IS NULL
+# MAGIC GROUP BY ALL
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT
+# MAGIC Applicant_Type, count(case when recordstatus IS TRUE and batch_cd = 'CG'  then 1 end) CG_Count
+# MAGIC from mypatronage_test 
+# MAGIC WHERE batch_cd = 'CG' 
+# MAGIC and (Status_Termination_Date is NULL or Status_Termination_Date >= date_format(current_date(), 'yyyyMMdd')) 
+# MAGIC AND RecordStatus IS TRUE 
+# MAGIC -- AND Caregiver_Status in ('Approved', 'Pending Revocation/Discharge')
+# MAGIC group by 1
+
+# COMMAND ----------
+
 # MAGIC %sql select date_format(current_date(), 'yyyyMMdd')
 
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC SELECT Batch_CD, count(*), (DATE(SDP_Event_Created_Timestamp)) 
+# MAGIC select * from mypatronage_test where ICN = '1000791177'
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC select ICN, filename, recordstatus, recordchangestatus from mypatronage_test where icn in (select ICN from mypatronage_test where batch_cd ='SCD'
+# MAGIC except
+# MAGIC SElect ICN from DELTA.`/mnt/Patronage/SCD_Staging` )
+# MAGIC order by ICN, recordstatus, recordchangestatus
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT count(DISTINCT ICN),'Josh_Count' FROM DELTA.`/mnt/Patronage/SCD_Staging`
+# MAGIC UNION ALL
+# MAGIC SELECT count(DISTINCT ICN), 'My_Count' FROM mypatronage_test where Batch_CD ='SCD' AND RecordStatus IS TRUE
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT count(*),'Josh_Count' FROM DELTA.`/mnt/Patronage/Caregivers_Staging_New` where Status = 'Approved'
+# MAGIC UNION ALL
+# MAGIC SELECT count(*), 'My_Count' FROM mypatronage_test where Batch_CD ='CG' AND RecordStatus IS TRUE AND Caregiver_Status = 'Approved'
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT * 
+# MAGIC FROM DELTA.`/mnt/Patronage/SCD_Staging` 
+# MAGIC WHERE EDIPI = 1608215081
+# MAGIC
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT count(*), (DATE(SDP_Event_Created_Timestamp)) 
 # MAGIC FROM 
 # MAGIC mypatronage_test
 # MAGIC -- DELTA.`/mnt/Patronage/SCD_Staging`
-# MAGIC -- DELTA.`/mnt/Patronage/Caregivers_Staging_New`
 # MAGIC WHERE EDIPI IS NOT NULL
-# MAGIC GROUP BY ALL
-# MAGIC ORDER BY 3 DESC
+# MAGIC GROUP BY ALL 
+# MAGIC ORDER BY 2 DESC
 # MAGIC
 
 # COMMAND ----------
@@ -839,6 +888,11 @@ print((file_creation_dateTime))
 # COMMAND ----------
 
 # MAGIC %sql
+# MAGIC SELECT * FROM DELTA.`/mnt/Patronage/SCD_Staging` limit 1
+
+# COMMAND ----------
+
+# MAGIC %sql
 # MAGIC SELECT count(*) FROM DELTA.`/mnt/Patronage/SCD_Staging`
 
 # COMMAND ----------
@@ -854,85 +908,87 @@ print((file_creation_dateTime))
 # COMMAND ----------
 
 # MAGIC %sql
+# MAGIC SELECT DISTINCT SC_Combined_Disability_Percentage, count(*) as Total_Count 
+# MAGIC FROM DELTA.`/mnt/Patronage/SCD_Staging`
+# MAGIC where Status_Last_Update >= 20240101
+# MAGIC GROUP BY ALL
+
+# COMMAND ----------
+
+new_cg_df = spark.read.csv("dbfs:/FileStore/All_Caregivers_InitialSeed_12182024_csv.csv", header=True, inferSchema=True) #use this dbfs:/FileStore/All_Caregivers_InitialSeed_12182024_csv.csv
+transformed_cg_df = (new_cg_df
+                        .select(substring("ICN", 1, 10).alias("ICN"),  
+                                "Applicant_Type", "Caregiver_Status", 
+                                date_format("Status_Begin_Date",'yyyyMMdd').alias("Status_Begin_Date"), 
+                                date_format("Status_Termination_Date", 'yyyyMMdd').alias("Status_Termination_Date"), 
+                                substring("Veteran_ICN", 1, 10).alias("Veteran_ICN"))
+)
+
+edipi_df = (
+        broadcast(transformed_cg_df)
+        .join(icn_relationship, ["ICN"], "left")
+        .withColumn("filename", lit("dbfs:/FileStore/All_Caregivers_InitialSeed_12182024_csv.csv"))
+        .withColumn("SDP_Event_Created_Timestamp", lit('2024-12-18T23:59:59.000+00:00').cast(TimestampType()))
+        .withColumn("Individual_Unemployability", lit(None).cast(StringType()))
+        .withColumn("PT_Indicator", lit(None).cast(StringType()))
+        .withColumn("SC_Combined_Disability_Percentage", lit(None).cast(StringType()))
+        .withColumn("RecordStatus", lit(True).cast(BooleanType()))
+        .withColumn("RecordLastUpdated", lit(None).cast(DateType()))
+        .withColumn("Status_Last_Update", lit(None).cast(StringType()))
+        .withColumn("sentToDoD", lit(False).cast(BooleanType()))
+        .withColumn("Batch_CD", lit("CG").cast(StringType()))
+)
+
+# COMMAND ----------
+
+edipi_df.createOrReplaceTempView("temp_df")
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT * FROM DELTA.`/mnt/Patronage/Caregivers_Staging_New` WHERE ICN NOT IN (SELECT ICN FROM temp_df)
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- SELECT * FROM temp_df  WHERE ICN NOT IN (SELECT ICN FROM DELTA.`/mnt/Patronage/Caregivers_Staging_New`)
+# MAGIC SELECT * FROM temp_df  WHERE ICN NOT IN (SELECT ICN FROM mypatronage_test WHERE batch_cd = 'CG' AND recordstatus IS TRUE) and Applicant_Type = 'Primary Caregiver'
+# MAGIC
+
+# COMMAND ----------
+
+# MAGIC %sql
 # MAGIC SELECT DISTINCT caregiver_status FROM mypatronage_test
 
 # COMMAND ----------
 
-df = spark.read.csv("dbfs:/mnt/ci-patronage/pai_landing/pt-indicator-6-6-24", schema=pai_schema, header=True)
-
-# COMMAND ----------
-
-df.count()
+# MAGIC %sql
+# MAGIC SELECT * FROM mypatronage_test WHERE ICN NOT IN (SELECT ICN FROM temp_df) and batch_cd = 'CG' AND recordstatus IS TRUE
 
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC -- SELECT * FROM DELTA.`/mnt/vac20sdpasa201vba/ci-vba-edw-2/DeltaTables/DW_ADHOC_RECURR.DOD_PATRONAGE_SCD_PT/` where PTCPNT_VET_ID = 14337381
+# MAGIC SELECT ICN, Veteran_ICN from temp_df WHERE Applicant_Type = 'Primary Caregiver'
+# MAGIC except
+# MAGIC SELECT ICN, Veteran_ICN FROM DELTA.`/mnt/Patronage/Caregivers_Staging_New`
+# MAGIC
 
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC SELECT * FROM (DESCRIBE HISTORY mypatronage_test)
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC -- RESTORE TABLE mypatronage_test VERSION AS OF 126
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC SELECT count(*)
-# MAGIC FROM mypatronage_test
-# MAGIC WHERE Batch_CD = 'SCD'
-# MAGIC AND filename = "Updated from PA&I delta table on 2025-01-10 18:40:52"
-
-# COMMAND ----------
-
-raw_file_folders = [
-    "/mnt/ci-carma/landing/",
-    "/mnt/ci-vadir-shared/",
-    "/mnt/ci-patronage/pai_landing/",
-    "/mnt/vac20sdpasa201vba/ci-vba-edw-2/",
-]
-cg_unix_start_time = get_unix_time(2024, 12, 18, 23, 59, 59)
-
-def get_dir_content(ls_path):
-    for dir_path in dbutils.fs.ls(ls_path):
-        (dir_path.path, dir_path.name, dir_path.size, dir_path.modificationTime)
-        if dir_path.isFile():
-            if (
-                (
-                    dir_path.name.startswith("caregiverevent")
-                    and dir_path.name.endswith(".csv")
-                    and dir_path.modificationTime > cg_unix_start_time
-                )
-                or (
-                    dir_path.name.startswith("CPIDODIEX_")
-                    and dir_path.name.endswith(".csv")
-                    and "NEW" not in dir_path.name
-                )
-                or (dir_path.name.startswith("WRTS") and dir_path.name.endswith(".txt"))
-                or (dir_path.path.startswith("dbfs:/mnt/vac20sdpasa201vba/ci-vba-edw-2/") and dir_path.name.endswith("parquet"))
-            ):
-                yield dir_path
-        elif dir_path.isDir() and ls_path != dir_path.path:
-            yield from get_dir_content(dir_path.path)
-
-# required_files = []
-# for folders in raw_file_folders:
-#     required_files += list(get_dir_content(folders))
-# # print(required_files)
-# test_df = spark.createDataFrame(data=required_files, schema=file_list_schema)
-
-master_file_list = [
-    file for folder in raw_file_folders 
-    for file in get_dir_content(folder)
-]
-
-file_list_df = spark.createDataFrame(master_file_list, file_list_schema)
-
-# COMMAND ----------
-
-file_list_df.withColumn("dateTime", to_timestamp(col("modificationTime") / 1000)).orderBy(col("modificationTime")).display()
-test_df.display()
+# MAGIC SELECT * FROM mypatronage_test
+# MAGIC WHERE ICN in (1039667651,
+# MAGIC 1059223696,
+# MAGIC 1018846965,
+# MAGIC 1078729015,
+# MAGIC 1079149790,
+# MAGIC 1021020827,
+# MAGIC 1039611026,
+# MAGIC 1058042343,
+# MAGIC 1079725456,
+# MAGIC 1037044750,
+# MAGIC 1078641436,
+# MAGIC 1078486174,
+# MAGIC 1061671967,
+# MAGIC 1007084713,
+# MAGIC 1077916059) AND batch_cd = 'CG'

@@ -10,8 +10,8 @@ from functools import reduce
 
 # COMMAND ----------
 
-# MAGIC %sql
-# MAGIC -- drop table test_correlations;
+# %sql
+# drop table test_correlations;
 
 # COMMAND ----------
 
@@ -31,7 +31,7 @@ Window_Spec = Window.partitionBy(
 ).orderBy(desc("CorrelationModifiedDateTime"))
 
 Window_Spec1 = Window.partitionBy(
-    "Person_MVIPersonICN"
+    "MVIPersonICN"
 ).orderBy(desc("calc_IngestionTimestamp"))
 
 basepath = "dbfs:/FileStore/"
@@ -40,66 +40,38 @@ basepath = "dbfs:/FileStore/"
 
 raw_psa_df = spark.read.parquet("/mnt/ci-mvi/Processed/SVeteran.SMVIPersonSiteAssociation/")
 
-person = (spark.read.parquet("dbfs:/mnt/ci-mvi/Processed/SVeteran.SMVIPerson"))
-person = (person
-          .withColumnRenamed("MVIPersonICN", "Person_MVIPersonICN")
-          .withColumn("rnk", rank().over(Window_Spec1)).filter(col("rnk")==1)
-          .select("Person_MVIPersonICN","ICNStatus", "calc_IngestionTimestamp")
+person_df = ((spark.read.parquet("dbfs:/mnt/ci-mvi/Processed/SVeteran.SMVIPerson"))
+    .withColumn("rnk", rank().over(Window_Spec1))
+    .filter(col("rnk") == 1)
+    .select("MVIPersonICN", "ICNStatus")
 )
 
-Institutions = spark.read.parquet("/mnt/ci-mvi/Raw/NDim.MVIInstitution/")
+institutions_df = spark.read.parquet("/mnt/ci-mvi/Raw/NDim.MVIInstitution/")
 
-join_df = (
-    raw_psa_df.filter(raw_psa_df["MVITreatingFacilityInstitutionSID"].isin([5667, 6061, 6722]))
-    .filter((raw_psa_df["ActiveMergedIdentifier"] == "Active")
-            | (raw_psa_df["ActiveMergedIdentifier"].isNull())
-    )
-    .filter(raw_psa_df["OpCode"] != 'D'
-    )    
-    .join(
-        Institutions,
-        raw_psa_df["MVITreatingFacilityInstitutionSID"]
-        == Institutions["MVIInstitutionSID"],
-        "left",
-    )
-    .join(person, raw_psa_df["MVIPersonICN"] == person["Person_MVIPersonICN"])
-    .filter(raw_psa_df["MVIPersonICN"].isNotNull())
-    .withColumn(
-        "ranked_value",
-        rank().over(Window_Spec)
-    )
-    .filter(col("ranked_value") == 1)
-    .select(
-        "MVITreatingFacilityInstitutionSID",
-        "ActiveMergedIdentifier",
-        raw_psa_df["OpCode"],
-        "MVIPersonSiteAssociationSID",
-        raw_psa_df["CorrelationModifiedDateTime"].cast("timestamp").alias("Last_updated"),
-        "institutionCode",
-        "TreatingFacilityPersonIdentifier",
-        "MVIPersonICN",
-        "MVIInstitutionSID", person["ICNStatus"]
-    )
+raw_psa_filtered_df = (raw_psa_df
+                       .filter((col("MVITreatingFacilityInstitutionSID").isin([5667, 6061, 6722])) &
+                               ((col("ActiveMergedIdentifier") == "Active") | col("ActiveMergedIdentifier").isNull()) &
+                               (col("MVIPersonICN").isNotNull() & (col("OpCode") != 'D')))
+                       .withColumn("rank", rank().over(Window_Spec))
+                       .filter(col("rank") == 1)
+                       .dropDuplicates(["MVIPersonICN", "MVITreatingFacilityInstitutionSID", "TreatingFacilityPersonIdentifier", "ActiveMergedIdentifier"])
+                       .select("MVIPersonICN", "MVITreatingFacilityInstitutionSID", "TreatingFacilityPersonIdentifier", "ActiveMergedIdentifier", "CorrelationModifiedDateTime")
 )
 
-
-filtered_df = (
-    join_df
-    .selectExpr(
-        "MVIInstitutionSID",
-        "MVITreatingFacilityInstitutionSID",
-        "institutionCode",
-        "MVIPersonSiteAssociationSID",
-        "TreatingFacilityPersonIdentifier",
-        "MVIPersonICN",
-        "Last_updated","ActiveMergedIdentifier", "ICNStatus"
-    )
-    .orderBy("MVIPersonICN")
+last_mod_status = (raw_psa_filtered_df
+                   .groupBy("MVIPersonICN")
+                   .agg(F.max("CorrelationModifiedDateTime").alias("Last_updated_date"))
+                   .select("MVIPersonICN", "Last_updated_date")
+)
+# Step 2: Filter and join raw_psa_df with institution 
+join_df = (raw_psa_filtered_df
+           .join(institutions_df.select("MVIInstitutionSID"), raw_psa_df["MVITreatingFacilityInstitutionSID"] == institutions_df["MVIInstitutionSID"], 
+          "left").orderBy("MVIPersonICN")
     .distinct()
 )
 
 multiple_icn = (
-    filtered_df.groupBy("TreatingFacilityPersonIdentifier", "MVIInstitutionSID")
+    join_df.groupBy("TreatingFacilityPersonIdentifier", "MVIInstitutionSID")
     .count()
     .filter(col("count") > 1)
     .withColumnRenamed("count", "icn_count")
@@ -109,7 +81,7 @@ multiple_icn = (
 
 
 multiple_tfpi = (
-    filtered_df.groupBy("MVIPersonICN", "MVIInstitutionSID")
+    join_df.groupBy("MVIPersonICN", "MVIInstitutionSID")
     .count()
     .filter(col("count") > 1)
     .withColumnRenamed("count", "tfpi_count")
@@ -118,35 +90,51 @@ multiple_tfpi = (
 )
 
 non_duplicates = (
-    filtered_df.join(
+    join_df.join(
         multiple_icn,
-        (filtered_df["TreatingFacilityPersonIdentifier"] == multiple_icn["TFPI"])
-        & (filtered_df["MVIInstitutionSID"] == multiple_icn["Inst"]),
+        (join_df["TreatingFacilityPersonIdentifier"] == multiple_icn["TFPI"])
+        & (join_df["MVIInstitutionSID"] == multiple_icn["Inst"]),
         "left",
     )
     .join(
         multiple_tfpi,
-        (filtered_df["MVIPersonICN"] == multiple_tfpi["ICN"])
-        & (filtered_df["MVIInstitutionSID"] == multiple_tfpi["Inst"]),
+        (join_df["MVIPersonICN"] == multiple_tfpi["ICN"])
+        & (join_df["MVIInstitutionSID"] == multiple_tfpi["Inst"]),
         "left",
     )
-    .filter(filtered_df["TreatingFacilityPersonIdentifier"].isNotNull())
-   .select(
-        filtered_df["MVIPersonICN"],
-        filtered_df["ActiveMergedIdentifier"],
-        filtered_df["MVIInstitutionSID"],
-        filtered_df["TreatingFacilityPersonIdentifier"]
-    )
+    .filter(join_df["TreatingFacilityPersonIdentifier"].isNotNull())
+#    .select(
+#         join_df["MVIPersonICN"],
+#         join_df["ActiveMergedIdentifier"],
+#         join_df["MVIInstitutionSID"],
+#         join_df["TreatingFacilityPersonIdentifier"]
+#     )
 )
 
 non_duplicates = non_duplicates.filter(col("icn_count").isNull()).filter(col("tfpi_count").isNull())
 
-unique_icn = (filtered_df
-              .groupBy(filtered_df["MVIPersonICN"], filtered_df["ICNStatus"])
-              .agg(max("Last_updated").cast("date").alias("Last_updated"))
-              .distinct()
-              .selectExpr("MVIPersonICN as ICN", "Last_updated", "ICNStatus")
+pivoted_df = (
+    non_duplicates
+    .withColumn("MVIInstitutionSID", when(col("MVITreatingFacilityInstitutionSID") == 5667, "EDIPI")
+                 .when(col("MVITreatingFacilityInstitutionSID") == 6061, "participant_id")
+                 .when(col("MVITreatingFacilityInstitutionSID") == 6722, "va_profile_id"))
+    .groupBy("MVIPersonICN")
+    .pivot("MVIInstitutionSID", ["EDIPI", "participant_id", "va_profile_id"])
+    .agg(first("TreatingFacilityPersonIdentifier"))
 )
+
+final_df = pivoted_df.join(last_mod_status, ["MVIPersonICN"], "left").join(person_df, ["MVIPersonICN"], "left")
+
+# unique_icn = (filtered_df
+#               .groupBy(filtered_df["MVIPersonICN"], filtered_df["ICNStatus"])
+#               .agg(max("Last_updated").cast("date").alias("Last_updated"))
+#               .distinct()
+#               .selectExpr("MVIPersonICN as ICN", "Last_updated", "ICNStatus")
+# )
+
+# COMMAND ----------
+
+final_df.groupBy(col("MVIPersonICN")).count().orderBy(col("count").desc()).display()
 
 # COMMAND ----------
 
@@ -154,46 +142,42 @@ raw_psa_df.filter(col("TreatingFacilityPersonIdentifier")== '5348444').filter(ra
 
 # COMMAND ----------
 
-multiple_tfpi.filter(col("icn")=='1010124988').display()
-
-# COMMAND ----------
-
-dod_df = (non_duplicates
-        .filter(
-        (non_duplicates["MVIInstitutionSID"] == 5667)
-                )
-        .selectExpr("MVIPersonICN as dod_icn", "TreatingFacilityPersonIdentifier as DoD_facility"))
+# dod_df = (non_duplicates
+#         .filter(
+#         (non_duplicates["MVIInstitutionSID"] == 5667)
+#                 )
+#         .selectExpr("MVIPersonICN as dod_icn", "TreatingFacilityPersonIdentifier as DoD_facility"))
 
 
-corp_df = (non_duplicates
-        .filter(
-        (non_duplicates["MVIInstitutionSID"] == 6061)
-                )
-        .selectExpr("MVIPersonICN as corp_icn", "TreatingFacilityPersonIdentifier as corp_facility"))
+# corp_df = (non_duplicates
+#         .filter(
+#         (non_duplicates["MVIInstitutionSID"] == 6061)
+#                 )
+#         .selectExpr("MVIPersonICN as corp_icn", "TreatingFacilityPersonIdentifier as corp_facility"))
 
 
-vets_df = (non_duplicates
-        .filter((non_duplicates["MVIInstitutionSID"] == 6722)
-                )
-        .selectExpr("MVIPersonICN as vets_icn", "TreatingFacilityPersonIdentifier as vets_facility"))
+# vets_df = (non_duplicates
+#         .filter((non_duplicates["MVIInstitutionSID"] == 6722)
+#                 )
+#         .selectExpr("MVIPersonICN as vets_icn", "TreatingFacilityPersonIdentifier as vets_facility"))
 
 
 # COMMAND ----------
 
-master_df = (
-    unique_icn
-    .join(dod_df, unique_icn["ICN"] == dod_df["dod_icn"], "left")
-    .join(corp_df, unique_icn["ICN"] == corp_df["corp_icn"], "left")
-    .join(vets_df, unique_icn["ICN"] == vets_df["vets_icn"], "left")
-    .select(
-        unique_icn["ICN"].alias("MVIPersonICN"),
-        dod_df["DoD_facility"].alias("EDIPI"),
-        corp_df["corp_facility"].alias("participant_id"),
-        vets_df["vets_facility"].alias("va_profile_id"),
-        unique_icn["Last_updated"].alias("Last_Updated_Date"),
-        unique_icn["ICNStatus"]
-    )
-)
+# master_df = (
+#     unique_icn
+#     .join(dod_df, unique_icn["ICN"] == dod_df["dod_icn"], "left")
+#     .join(corp_df, unique_icn["ICN"] == corp_df["corp_icn"], "left")
+#     .join(vets_df, unique_icn["ICN"] == vets_df["vets_icn"], "left")
+#     .select(
+#         unique_icn["ICN"].alias("MVIPersonICN"),
+#         dod_df["DoD_facility"].alias("EDIPI"),
+#         corp_df["corp_facility"].alias("participant_id"),
+#         vets_df["vets_facility"].alias("va_profile_id"),
+#         unique_icn["Last_updated"].alias("Last_Updated_Date"),
+#         unique_icn["ICNStatus"]
+#     )
+# )
 
 # COMMAND ----------
 
@@ -201,17 +185,11 @@ master_df.display()
 
 # COMMAND ----------
 
-input_value = [5348444]
-result_df = get_any_id(df, input_value)
-display(result_df)
-
-# COMMAND ----------
-
 spark.sql("OPTIMIZE delta.`dbfs:/FileStore/test_correlations`")
 target = DeltaTable.forPath(spark, basepath + "test_correlations")
 
 target.alias("target").merge(
-    source=master_df.alias("source"),
+    source=final_df.alias("source"),
     condition="(target.MVIPersonICN = source.MVIPersonICN)",
 ).whenMatchedUpdate(
     condition=expr("xxhash64(target.participant_id, target.va_profile_id, target.EDIPI) != xxhash64(source.participant_id, source.va_profile_id, source.EDIPI)"),
@@ -247,10 +225,6 @@ target.alias("target").merge(
 
 # COMMAND ----------
 
-master_df.count()
-
-# COMMAND ----------
-
 # MAGIC %sql
 # MAGIC SELECT
 # MAGIC   version,
@@ -266,51 +240,7 @@ master_df.count()
 
 # COMMAND ----------
 
-# MAGIC %sql
-# MAGIC SELECT
-# MAGIC   version,
-# MAGIC   operation,
-# MAGIC   cast(operationMetrics.numTargetRowsInserted as INT) as Inserted,
-# MAGIC   cast(operationMetrics.numTargetRowsUpdated as INT) as Updates  
-# MAGIC FROM
-# MAGIC   (describe history DELTA.`dbfs:/mnt/Patronage/identity_correlations`)
-# MAGIC where
-# MAGIC   operation not in ("CREATE TABLE", "OPTIMIZE")
-# MAGIC order by
-# MAGIC   1 desc;
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC select count(*)  from test_correlations
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC SELECT ICNStatus, count(*) FROM test_correlations
-# MAGIC GROUP BY (ICNStatus)
-
-# COMMAND ----------
-
-master_df.groupBy("MVIPersonICN").count().orderBy("count", desc("count")).filter("count>1").display()
-
-# COMMAND ----------
-
-person.filter(person["Person_MVIPersonICN"] == 1000768382).display()
-
-# COMMAND ----------
-
-temp_person = spark.read.parquet("dbfs:/mnt/ci-mvi/Processed/SVeteran.SMVIPerson").withColumnRenamed("MVIPersonICN", "Person_MVIPersonICN")
-temp_person.filter(temp_person["Person_MVIPersonICN"] == 1000768382).display()
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC OPTIMIZE delta.`dbfs:/FileStore/test_correlations`
-
-# COMMAND ----------
-
-df = spark.table('test_correlations')
+df = spark.table('test_correlations_1')
 
 # COMMAND ----------
 
@@ -374,10 +304,11 @@ def get_any_id(df, input_value):
     df_filtered = df.filter(reduce(lambda a, b: a | b, conditions))
 
     return df_filtered
+    
 
 # COMMAND ----------
 
-input_value = [5348444, 1010124988, 1019267760]
+input_value = [47578199]
 df = spark.table('test_correlations')
 df = df.drop("Last_updated_date")
 result_df = get_any_id(df, input_value)
@@ -385,7 +316,33 @@ display(result_df)
 
 # COMMAND ----------
 
-get_summary(df.drop("Last_Updated_Date")).display()
+d1 = DeltaTable.forPath(spark, "dbfs:/mnt/Patronage/identity_correlations")
+df1 = d1.toDF()
+
+# COMMAND ----------
+
+get_summary(df.drop("Last_updated_date")).display()
+
+# COMMAND ----------
+
+get_summary(df1.drop("record_updated_date")).display()
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC --SELECT * FROM test_correlations_1  WHERE MVIPersonICN in (1064103767,1077474889)--participant_id = 62329400 -- va_profile_id =32025585 
+# MAGIC SELECT * FROM DELTA.`dbfs:/mnt/Patronage/identity_correlations` WHERE MVIPersonICN IN (1064103767,1077006882,1077474889)
+# MAGIC -- not in (SELECT MVIPersonICN FROM DELTA.`dbfs:/mnt/Patronage/identity_correlations` )
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT * FROM test_correlations_1  WHERE  MVIPersonICN IN (1064103767,1077006882,1077474889)
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT * FROM DELTA.`dbfs:/mnt/Patronage/identity_correlations` WHERE MVIPersonICN not in (SELECT MVIPersonICN from test_correlations_1)
 
 # COMMAND ----------
 
@@ -397,31 +354,43 @@ display(result_df)
 
 # MAGIC %sql
 # MAGIC CREATE OR REPLACE TEMPORARY VIEW not_in_josh as 
-# MAGIC SELECT * FROM test_correlations
-# MAGIC WHERE MVIPersonICN IN (
+# MAGIC -- SELECT * FROM test_correlations
+# MAGIC -- WHERE MVIPersonICN IN (
+# MAGIC
+# MAGIC
+# MAGIC SELECT MVIPersonICN FROM DELTA.`dbfs:/mnt/Patronage/identity_correlations` MINUS
 # MAGIC SELECT MVIPersonICN FROM DELTA.`dbfs:/FileStore/test_correlations`
-# MAGIC MINUS
-# MAGIC SELECT MVIPersonICN FROM DELTA.`dbfs:/mnt/Patronage/identity_correlations` )
+# MAGIC -- )
 
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC SELECT * FROM DELTA.`dbfs:/mnt/ci-patronage/delta_tables/identity_correlations_table` 
-# MAGIC -- select * from not_in_josh
+# MAGIC -- SELECT * FROM  DELTA.`dbfs:/mnt/Patronage/identity_correlations` 
+# MAGIC select * from not_in_josh
 
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC SELECT count(MVIPersonICN),"JoshDBFSCount" FROM DELTA.`dbfs:/mnt/Patronage/identity_correlations` 
-# MAGIC UNION
-# MAGIC SELECT count(MVIPersonICN), "myCount" FROM DELTA.`dbfs:/FileStore/test_correlations` 
-# MAGIC UNION
-# MAGIC SELECT count(MVIPersonICN), "patronageCount" FROM DELTA.`/mnt/ci-patronage/delta_tables/identity_correlations_table` 
+# MAGIC SELECT count(*) FROM  DELTA.`dbfs:/mnt/Patronage/identity_correlations` where participant_id is null and  edipi is null and va_profile_id is NULL
+# MAGIC --  where MVIPersonICN = 1001851303
 
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC select * from DELTA.`/mnt/ci-patronage/delta_tables/identity_correlations_table`
+# MAGIC SELECT count(*) FROM  test_correlations where participant_id is null and  edipi is null and va_profile_id is NULL
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC select * from test_correlations where MVIPersonICN = 1001851303
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT count(MVIPersonICN),"JoshDBFSCount" FROM DELTA.`dbfs:/mnt/Patronage/identity_correlations` where edipi is NULL and  participant_id is null AND va_profile_id IS NULL
+# MAGIC -- # UNION
+# MAGIC -- # SELECT count(MVIPersonICN), "myCount" FROM DELTA.`dbfs:/FileStore/test_correlations` 
+# MAGIC -- # 59467388 - 59876763
 
 # COMMAND ----------
 
@@ -450,53 +419,114 @@ display(result_df)
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC SELECT count( DISTINCT(participant_id)) FROM DELTA.`dbfs:/mnt/ci-patronage/delta_tables/identity_correlations_table/`
-# MAGIC -- 57437759
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC Select * from test_correlations 
-# MAGIC where participant_id in (Select participant_id  from  test_correlations
-# MAGIC group by participant_id
-# MAGIC having count(*) > 1)
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC select distinct count(va_profile_id) from test_correlations
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC select 57617248 - 57596113
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC select MVIPersonICN, count(*) from test_correlations group by all having count(*) > 1
-
-# COMMAND ----------
-
-# MAGIC %sql
 # MAGIC select * from test_correlations where MVIPersonICN = 1052724750
 
 # COMMAND ----------
 
-Institutions.limit(1).display()
+multiple_tfpi.filter(col("icn")=='1047965857').display()
 
 # COMMAND ----------
 
-Institutions.select("InstitutionName", "MVIInstitutionSID").distinct().display()
+multiple_icn.filter(col("TFPI")=='1047965857').display()
 
 # COMMAND ----------
 
-Institutions.display()
+join_df.filter(col("MVIPersonICN") == '1047965857').display()
 
 # COMMAND ----------
 
-Institutions.select("MVIInstitutionIEN", "MVIFacilityTypeIEN", "InstitutionName" ).distinct().orderBy("MVIFacilityTypeIEN","MVIInstitutionIEN").display()
+raw_psa_df.createOrReplaceTempView("raw_psa")
 
 # COMMAND ----------
 
-multiple_tfpi.filter(col("icn")=='1010124988').display()
+# DBTITLE 1,Filtering by ICN
+# MAGIC %sql
+# MAGIC select 
+# MAGIC   MVIPersonICN, MVITreatingFacilityInstitutionSID,
+# MAGIC   TreatingFacilityPersonIdentifier, 
+# MAGIC   ActiveMergedIdentifier,
+# MAGIC   CorrelationModifiedDateTime,  
+# MAGIC   rank() over (partition by MVIPersonICN, MVITreatingFacilityInstitutionSID, TreatingFacilityPersonIdentifier order by CorrelationModifiedDateTime desc  )  as rnk
+# MAGIC from raw_psa 
+# MAGIC where MVIPersonICN in (1029805160)                         -- (1018744003, 1045127634, 1023717356, 1077148299, 1024489160)
+# MAGIC and MVITreatingFacilityInstitutionSID in (5667, 6061, 6722)
+# MAGIC and ActiveMergedIdentifier = 'Active'
+# MAGIC -- qualify rnk <= 2
+# MAGIC order by 1, 2, 3, 5 desc
+
+# COMMAND ----------
+
+# DBTITLE 1,Filtering by TreatingFacilityPersonIdentifier
+# MAGIC %sql
+# MAGIC select 
+# MAGIC   MVIPersonICN, MVITreatingFacilityInstitutionSID,
+# MAGIC   TreatingFacilityPersonIdentifier, 
+# MAGIC   ActiveMergedIdentifier,
+# MAGIC   CorrelationModifiedDateTime,  
+# MAGIC   rank() over (partition by MVIPersonICN, MVITreatingFacilityInstitutionSID, TreatingFacilityPersonIdentifier order by CorrelationModifiedDateTime desc  )  as rnk
+# MAGIC from raw_psa 
+# MAGIC where TreatingFacilityPersonIdentifier in (47578199, 47714383)                         -- (1018744003, 1045127634, 1023717356, 1077148299, 1024489160)
+# MAGIC and MVITreatingFacilityInstitutionSID in (5667, 6061, 6722)
+# MAGIC and ActiveMergedIdentifier = 'Active'
+# MAGIC -- qualify rnk <= 2
+# MAGIC order by 1, 2, 3, 5 desc
+
+# COMMAND ----------
+
+filtered_df.filter(col("TreatingFacilityPersonIdentifier").isin([47578199, 47714383])).filter(filtered_df["MVITreatingFacilityInstitutionSID"].isin([5667, 6061, 6722])).display()
+
+
+# COMMAND ----------
+
+join_df.filter(col("TreatingFacilityPersonIdentifier").isin([47578199, 47714383])).filter(join_df["MVITreatingFacilityInstitutionSID"].isin([5667, 6061, 6722])).display()
+
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC with cte1 as (
+# MAGIC select 
+# MAGIC   MVIPersonICN, 
+# MAGIC   TreatingFacilityPersonIdentifier, 
+# MAGIC   MVITreatingFacilityInstitutionSID,
+# MAGIC   ActiveMergedIdentifier,
+# MAGIC   CorrelationModifiedDateTime,  
+# MAGIC   rank() over (partition by MVIPersonICN, MVITreatingFacilityInstitutionSID, TreatingFacilityPersonIdentifier order by CorrelationModifiedDateTime desc  ) as rnk
+# MAGIC from raw_psa 
+# MAGIC where MVIPersonICN in (1000971431, 1047965857)
+# MAGIC and MVITreatingFacilityInstitutionSID in (5667, 6061, 6722)
+# MAGIC and ActiveMergedIdentifier = 'Active'
+# MAGIC qualify rnk <= 2)
+# MAGIC select MVIPersonICN, from cte1
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT * FROM test_correlations  where MVIPersonICN IN (1045127634,1023717356, 1077148299, 1024489160, 1029805160 )
+# MAGIC
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT * FROM DELTA.`dbfs:/mnt/Patronage/identity_correlations`  where MVIPersonICN IN  (1045127634,1023717356, 1077148299, 1024489160, 1029805160)
+
+# COMMAND ----------
+
+df = spark.table('test_correlations')
+df = df.drop("Last_updated_date")
+
+# COMMAND ----------
+
+input_value = [1029805160, 23224257]
+
+result_df = get_any_id(df, input_value)
+display(result_df)
+
+# COMMAND ----------
+
+psa.filter(col("MVIPersonICN").isin([1029805160])).filter(psa["MVITreatingFacilityInstitutionSID"].isin([5667, 6061, 6722])).display()
+
+# COMMAND ----------
+
+psa.filter(col("MVIPersonICN").isin([1029805160])).filter(psa["MVITreatingFacilityInstitutionSID"].isin([5667, 6061, 6722])).dropDuplicates(["MVIPersonICN", "MVITreatingFacilityInstitutionSID", "TreatingFacilityPersonIdentifier","Last_Modified"]).display()
+

@@ -5,6 +5,7 @@
 # COMMAND ----------
 
 # DBTITLE 1,Import Libraries
+spark.conf.set("spark.databricks.io.cache.enabled", "true")
 from delta.tables import *
 from pyspark.sql.types import *
 from pyspark.sql.functions import *
@@ -840,7 +841,68 @@ display(remaining_files)
 
 # COMMAND ----------
 
+6172610 - 6176073
+
+# COMMAND ----------
+
+6166338 - 6172146
+
+# COMMAND ----------
+
 # MAGIC %sql
 # MAGIC SELECT count(*),'Josh_Count' FROM DELTA.`/mnt/Patronage/Caregivers_Staging_New` where Status = 'Approved'
 # MAGIC UNION ALL
 # MAGIC SELECT count(*), 'My_Count' FROM mypatronage_new where Batch_CD ='CG' AND RecordStatus IS TRUE AND Caregiver_Status = 'Approved'
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT max(SDP_Event_Created_Timestamp) FROM DELTA.`/mnt/Patronage/SCD_Staging` 
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT DISTINCT RecordChangeStatus, count(*), SDP_Event_Created_Timestamp
+# MAGIC FROM   mypatronage_new
+# MAGIC WHERE SDP_Event_Created_Timestamp =  (SELECT DISTINCT SDP_Event_Created_Timestamp FROM mypatronage_new where BATCH_CD = 'SCD' ORDER BY 1 desc LIMIT 1 OFFSET 0)
+# MAGIC GROUP BY ALL
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT DISTINCT SDP_Event_Created_Timestamp FROM mypatronage_new where BATCH_CD = 'SCD' --ORDER BY 1 desc LIMIT 1 OFFSET 1 ()
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT * FROM DELTA.`/mnt/Patronage/SCD_Staging` limit 1
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT count(*) FROM DELTA.`/mnt/Patronage/SCD_Staging`
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT  DISTINCT SC_Combined_Disability_Percentage, PT_Indicator, count(*) as Total_Count FROM DELTA.`/mnt/Patronage/SCD_Staging` group BY ALL
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT  DISTINCT PT_Indicator, count(*) as Total_Count FROM DELTA.`/mnt/Patronage/SCD_Staging` group BY ALL
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT date('20240524');
+# MAGIC --where date_format(to_date(Status_Last_Update, 'yyyyMMdd'), 'MM-dd-yyyy') > to_date('01-01-2024', 'MM-dd-yyyy') 
+# MAGIC
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT DISTINCT SC_Combined_Disability_Percentage, count(*) as Total_Count 
+# MAGIC FROM DELTA.`/mnt/Patronage/SCD_Staging`
+# MAGIC where Status_Last_Update >= 20240101
+# MAGIC GROUP BY ALL
