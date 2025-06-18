@@ -11,6 +11,11 @@ from pyspark.storagelevel import *
 
 # COMMAND ----------
 
+path = "/mnt/vac20sdpasa201vba/ci-vba-edw-2/DeltaTables/DW_ADHOC_RECURR.DOD_PATRONAGE_SCD_PT/"
+dbutils.fs.ls(path)
+
+# COMMAND ----------
+
 def validate_data(df: DataFrame, checks: List[Tuple[str, str]]) -> List[str]:
     """
     Parameters: df-->Dataframe, checks-->List
@@ -70,7 +75,7 @@ def main():
     # Paths and reading source files
     cg_file_path = "/mnt/ci-carma/landing"
     scd_file_path = "/mnt/ci-vadir-shared/"
-    pt_indicator_path = "dbfs:/mnt/vac20sdpasa201vba/ci-vba-edw-2/DeltaTables/DW_ADHOC_RECURR.DOD_PATRONAGE_SCD_PT/"
+    pt_indicator_path = "/mnt/vac20sdpasa201vba/ci-vba-edw-2/DeltaTables/DW_ADHOC_RECURR.DOD_PATRONAGE_SCD_PT/"
 
     cg_files_df = read_files(cg_file_path, "binaryFile", 'caregiverevent')
     scd_files_df = read_files(scd_file_path, "binaryFile", 'CPIDODIEX_')
@@ -99,6 +104,10 @@ def main():
         (~col("Status").isin(['Approved', 'Revoked/Discharged', 'Revoked', 'Pending Revocation/Discharge']), "Invalid CG Status"),
     ]
 
+    pt_indicator_checks = [
+        (~col('PT_35_FLAG').isin(['Y']), "Invalid PT Indicator")
+    ]
+
     # Load tables
     icn_relationship = (
         spark.read.format("delta")
@@ -110,6 +119,9 @@ def main():
     scd_table_df = spark.table("DELTA.`/mnt/Patronage/SCD_Staging`")
 
     cg_table_df = spark.table("DELTA.`/mnt/Patronage/Caregivers_Staging_New`")
+
+    pt_table_df = spark.table("DELTA.`/mnt/vac20sdpasa201vba/ci-vba-edw-2/DeltaTables/DW_ADHOC_RECURR.DOD_PATRONAGE_SCD_PT/`")
+
 
     scd_null_edipi_df = get_null_edipi(scd_table_df, icn_relationship)
     cg_null_edipi_df = get_null_edipi(cg_table_df, icn_relationship)
@@ -125,6 +137,7 @@ def main():
     error_messages = []
     error_messages.extend(validate_data(scd_table_df, scd_validation_checks))
     error_messages.extend(validate_data(cg_table_df, cg_validation_checks))
+    error_messages.extend(validate_data(pt_table_df, pt_indicator_checks))
 
     if scd_new_edipi_cnt > 0:
         error_messages.append(f"There are {scd_new_edipi_cnt} new EDIPI's in identity_correlations table that can be updated to SCD Staging table")
@@ -144,10 +157,11 @@ def main():
 
     # Final status
     if error_messages and (cg_null_edipi_df or cg_null_edipi_df):
-        print({"status": "Failed", "errors": error_messages})
-        pass
+        status = "Failed"
+        print({f"'Today': {today},  'status': {status}, 'errors': {error_messages}"})
     else:
-        dbutils.notebook.exit({"status": "Passed", "message": "No errors found"})
+        status = "Passed"
+        dbutils.notebook.exit({f"'Today': {today},'status': {status}, 'message': 'No errors found'"})
 
 main()
 

@@ -68,7 +68,6 @@ def get_data():
         and Applicant_Type = 'Primary Caregiver'
         and (Status_Termination_Date is NULL OR Status_Termination_Date >= curdate()
             OR Status IN ('Approved', 'Pending Revocation/Discharge'))
-        and EDIPI is not null
         """
     scd_query = f"""
         select rpad(coalesce(edipi,''),10,' ' ) ||
