@@ -95,4 +95,6 @@ See `pipeline_patronage_relationships.ipynb` for a real-world example of using t
 ## Support & Contribution
 
 - For questions or improvements, please contact the package maintainer or submit a pull request.
-- Contributions and suggestions are welcome!
+- Umair Ahmed: QA Engineer
+- Bhavesh Patel: Data Engineer
+##### Contributions and suggestions are welcome!
