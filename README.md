@@ -239,5 +239,6 @@ flowchart LR
 <!-- - Original Databricks notebook: `Patronage V4.ipynb` -->
 - Delta Lake docs: https://docs.delta.io/latest/delta-intro.html
 - PySpark docs: https://spark.apache.org/docs/latest/api/python/
+- Bhavesh Patel: bhavesh.patel3@va.gov
 
 ---
