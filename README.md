@@ -241,5 +241,8 @@ flowchart LR
 - PySpark docs: https://spark.apache.org/docs/latest/api/python/
 
 ---
+## Contributions
+- Umair Ahmed   :=> QA Engineer
+- Bhavesh Patel :=> Data Engineer
 =======
 # Patronage
