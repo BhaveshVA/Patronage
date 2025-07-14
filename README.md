@@ -243,6 +243,7 @@ flowchart LR
 ---
 ## Contributions
 - Umair Ahmed: QA Engineer
-- Bhavesh Patel:Data Engineer
-=======
+- Bhavesh Patel: Data Engineer
+---
 # Patronage
+---
