@@ -6,7 +6,7 @@ from pyspark.sql import DataFrame, Window
 from pyspark.sql.functions import col, desc, rank, broadcast, max, collect_list, struct, first
 
 # Configuration for data sources (can be overridden by user)
-DEFAULT_CONFIG = {
+CORR_CONFIG = {
     "psa": {
         "columns": [
             "MVIPersonICN",
@@ -34,7 +34,7 @@ DEFAULT_CONFIG = {
     }
 }
 
-def filter_psa(psa_df: DataFrame, config=DEFAULT_CONFIG) -> DataFrame:
+def filter_psa(psa_df: DataFrame, config=CORR_CONFIG) -> DataFrame:
     """Filter and rank the Person Site Association DataFrame."""
     src = config["psa"]
     return (
@@ -44,7 +44,7 @@ def filter_psa(psa_df: DataFrame, config=DEFAULT_CONFIG) -> DataFrame:
               .select(src["columns"])
     )
 
-def filter_person(person_df: DataFrame, config=DEFAULT_CONFIG) -> DataFrame:
+def filter_person(person_df: DataFrame, config=CORR_CONFIG) -> DataFrame:
     """Filter and rank the Person DataFrame."""
     src = config["person"]
     return (
@@ -53,7 +53,7 @@ def filter_person(person_df: DataFrame, config=DEFAULT_CONFIG) -> DataFrame:
                  .select(src["columns"])
     )
 
-def filter_institution(institution_df: DataFrame, config=DEFAULT_CONFIG) -> DataFrame:
+def filter_institution(institution_df: DataFrame, config=CORR_CONFIG) -> DataFrame:
     """Filter the Institution DataFrame."""
     src = config["institution"]
     return (
