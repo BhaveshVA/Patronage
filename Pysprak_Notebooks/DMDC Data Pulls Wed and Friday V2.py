@@ -236,7 +236,7 @@ def is_valid_execution_day(current_date: date) -> bool:
     """
     return current_date.weekday() in [2, 4]
 
-def get_start_time(current_date: date) -> datetime:
+def get_start_time(current_date: datetime) -> datetime:
     """
     Calculate the start time based on the current day.
     For Wednesday, it's previous day, for Friday it's current day midnight.
@@ -322,10 +322,10 @@ def get_last_run_date() -> date:
         date: The last run date or current date if no previous runs
     """
     return spark.sql(
-        'SELECT COALESCE(DATE(max(checkpoint_timestamp)), current_date()) AS last_run_date FROM dmdc_checkpoint'
+        'SELECT COALESCE(DATEADD(hour, -4, checkpoint_timestamp), current_date()) AS last_run_date FROM dmdc_checkpoint ORDER BY checkpoint_timestamp DESC '
     ).first()[0]
 
-def build_cg_query(last_run_date: date, today_start_time: datetime) -> str:
+def build_cg_query(last_run_date: datetime, today_start_time: datetime) -> str:
     """
     Build the query for Caregivers data with proper formatting.
     
@@ -347,7 +347,7 @@ def build_cg_query(last_run_date: date, today_start_time: datetime) -> str:
             rpad(coalesce(date_format(Status_Last_Update, 'yyyyMMdd'),''),8,' ') ||
             rpad(coalesce(date_format(Status_Termination_Date, 'yyyyMMdd'),''),8,' ') as CG
         FROM cg_data
-        WHERE SDP_Event_Created_Timestamp >= DATE('{last_run_date}')
+        WHERE SDP_Event_Created_Timestamp >= '{last_run_date}'
         AND SDP_Event_Created_Timestamp <= DATE('{today_start_time}')
         AND EDIPI IS NOT NULL
         AND Applicant_Type = 'Primary Caregiver'
@@ -356,7 +356,7 @@ def build_cg_query(last_run_date: date, today_start_time: datetime) -> str:
              OR Status IN ('Approved', 'Pending Revocation/Discharge'))
     """
 
-def build_scd_query(last_run_date: date, today_start_time: datetime) -> str:
+def build_scd_query(last_run_date: datetime, today_start_time: datetime) -> str:
     """
     Build the query for SCD data with proper formatting.
     
@@ -378,10 +378,11 @@ def build_scd_query(last_run_date: date, today_start_time: datetime) -> str:
             rpad(coalesce(Status_Last_Update,''),8,' ') ||
             rpad(coalesce(Status_Termination_Date,''),8,' ') as CG
         FROM scd_data
-        WHERE SDP_Event_Created_Timestamp >= DATE('{last_run_date}')
+        WHERE SDP_Event_Created_Timestamp >= DATE('{last_run_date + timedelta(hours=4)}')
         AND SDP_Event_Created_Timestamp <= DATE('{today_start_time}')
         AND edipi IS NOT NULL
     """
+# 
 
 # COMMAND ----------
 
@@ -482,4 +483,42 @@ if __name__ == "__main__":
 
 # COMMAND ----------
 
+# MAGIC %sql
+# MAGIC SELECT * FROM dmdc_checkpoint ORDER BY checkpoint_timestamp DESC LIMIT 5
 
+# COMMAND ----------
+
+# %sql
+#         SELECT count(*)
+#             -- rpad(coalesce(EDIPI,''),10,' ' ) ||
+#             -- rpad(coalesce(Batch_CD,''), 3,' ') ||
+#             -- rpad(coalesce(SC_Combined_Disability_Percentage,''),3,' ') ||
+#             -- rpad(coalesce(date_format(status_begin_date, 'yyyyMMdd'),''),8,' ') ||
+#             -- rpad(coalesce(PT_Indicator,''),1,' ') ||
+#             -- rpad(coalesce(Individual_Unemployability,''),1,' ') ||  
+#             -- rpad(coalesce(date_format(Status_Last_Update, 'yyyyMMdd'),''),8,' ') ||
+#             -- rpad(coalesce(date_format(Status_Termination_Date, 'yyyyMMdd'),''),8,' ') as CG
+#         FROM cg_data
+#         WHERE SDP_Event_Created_Timestamp >= DATE('2025-07-22')
+#         AND SDP_Event_Created_Timestamp <= DATE('2025-07-26')
+#         AND EDIPI IS NOT NULL
+#         AND Applicant_Type = 'Primary Caregiver'
+#         AND (Status_Termination_Date IS NULL 
+#              OR Status_Termination_Date >= curdate()
+#              OR Status IN ('Approved', 'Pending Revocation/Discharge'))
+    
+# UNION ALL
+
+#         SELECT count(*)
+#             -- rpad(coalesce(edipi,''),10,' ' ) ||
+#             -- rpad(coalesce(Batch_CD,''), 3,' ') ||
+#             -- rpad(coalesce(SC_Combined_Disability_Percentage,''),3,' ') ||
+#             -- rpad(coalesce(Status_Begin_Date,''),8,' ') ||
+#             -- rpad(coalesce(PT_Indicator,''),1,' ') ||
+#             -- rpad(coalesce(Individual_Unemployability,''),1,' ') ||
+#             -- rpad(coalesce(Status_Last_Update,''),8,' ') ||
+#             -- rpad(coalesce(Status_Termination_Date,''),8,' ') as CG
+#         FROM scd_data
+#         WHERE SDP_Event_Created_Timestamp > DATE('2025-07-25')
+#         AND SDP_Event_Created_Timestamp <= DATE('2025-07-29')
+#         AND edipi IS NOT NULL

@@ -11,11 +11,6 @@ from pyspark.storagelevel import *
 
 # COMMAND ----------
 
-path = "/mnt/vac20sdpasa201vba/ci-vba-edw-2/DeltaTables/DW_ADHOC_RECURR.DOD_PATRONAGE_SCD_PT/"
-dbutils.fs.ls(path)
-
-# COMMAND ----------
-
 def validate_data(df: DataFrame, checks: List[Tuple[str, str]]) -> List[str]:
     """
     Parameters: df-->Dataframe, checks-->List
@@ -77,8 +72,8 @@ def main():
     scd_file_path = "/mnt/ci-vadir-shared/"
     pt_indicator_path = "/mnt/vac20sdpasa201vba/ci-vba-edw-2/DeltaTables/DW_ADHOC_RECURR.DOD_PATRONAGE_SCD_PT/"
 
-    cg_files_df = read_files(cg_file_path, "binaryFile", 'caregiverevent')
-    scd_files_df = read_files(scd_file_path, "binaryFile", 'CPIDODIEX_')
+    cg_files_df = read_files(cg_file_path, "binaryFile", "caregiverevent")
+    scd_files_df = read_files(scd_file_path, "binaryFile", "CPIDODIEX_")
 
     pt_files_df = get_files(pt_indicator_path)
 
@@ -88,24 +83,24 @@ def main():
 
     # Validation checks
     scd_validation_checks = [
-        (~col('ICN').rlike('^[0-9]'), "Invalid SCD ICN's"),
-        (~col("Batch_CD").isin(['SCD']), "Invalid Batch Code"),
-        (~col("PT_Indicator").isin(['Y', 'N']), "Invalid PT Indicator"),
+        (~col("ICN").rlike("^[0-9]"), "Invalid SCD ICN's"),
+        (~col("Batch_CD").isin(["SCD"]), "Invalid Batch Code"),
+        (~col("PT_Indicator").isin(["Y", "N"]), "Invalid PT Indicator"),
         (col("Status_Begin_Date").isNull(), "Status_Begin_Date is Null"),
         (~col("SC_Combined_Disability_Percentage").isin(["000", "010", "020", "030", "040", "050", "060", "070", "080", "090", "100"]), 
         "Invalid SC_Combined_Disability_Percentage"),
     ]
 
     cg_validation_checks = [
-        (~col('ICN').rlike('^[0-9]'), "Invalid CG ICN's"),
+        (~col("ICN").rlike("^[0-9]"), "Invalid CG ICN's"),
         (~col("Batch_CD").isin(['CG']), "Invalid CG Batch Code"),
         (col("Status_Begin_Date").isNull(), "CG Status_Begin_Date is Null"),
-        (~col("Applicant_Type").isin(['Primary Caregiver', 'General Caregiver', 'Secondary Caregiver']), "Invalid CG Applicant Type"),
-        (~col("Status").isin(['Approved', 'Revoked/Discharged', 'Revoked', 'Pending Revocation/Discharge']), "Invalid CG Status"),
+        (~col("Applicant_Type").isin(["Primary Caregiver", "General Caregiver", "Secondary Caregiver"]), "Invalid CG Applicant Type"),
+        (~col("Status").isin(["Approved", "Revoked/Discharged", "Revoked", "Pending Revocation/Discharge"]), "Invalid CG Status"),
     ]
 
     pt_indicator_checks = [
-        (~col('PT_35_FLAG').isin(['Y']), "Invalid PT Indicator")
+        (~col("PT_35_FLAG").isin(["Y"]), "Invalid PT Indicator")
     ]
 
     # Load tables
@@ -140,28 +135,28 @@ def main():
     error_messages.extend(validate_data(pt_table_df, pt_indicator_checks))
 
     if scd_new_edipi_cnt > 0:
-        error_messages.append(f"There are {scd_new_edipi_cnt} new EDIPI's in identity_correlations table that can be updated to SCD Staging table")
+        error_messages.append(f"""There are {scd_new_edipi_cnt} new EDIPIs in identity_correlations table that can be updated to SCD Staging table""")
 
     if cg_new_edipi_cnt > 0:
-        error_messages.append(f"There are {cg_new_edipi_cnt} new EDIPI's in identity_correlations table that can be updated to CG Staging table")
+        error_messages.append(f"""There are {cg_new_edipi_cnt} new EDIPIs in identity_correlations table that can be updated to CG Staging table""")
 
     # Modification time checks
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
     if ((today - cg_max_mod_time).days) >= 1:
-        error_messages.append(f"No new Caregivers files have landed since {((today - cg_max_mod_time).days)} day/s")
+        error_messages.append(f"""No new Caregivers files have landed since {((today - cg_max_mod_time).days)} day/s""")
     if ((today - scd_max_mod_time).days) >= 7:
-        error_messages.append(f"No new SCD files have landed since {((today - scd_max_mod_time).days)} day/s")
+        error_messages.append(f"""No new SCD files have landed since {((today - scd_max_mod_time).days)} day/s""")
     if ((today - pt_max_mod_time).days) >= 30:
-        error_messages.append(f"No new PT_Indicator files have landed since {((today - pt_max_mod_time).days)} day/s")
+        error_messages.append(f"""No new PT_Indicator files have landed since {((today - pt_max_mod_time).days)} day/s""")
 
     # Final status
     if error_messages and (cg_null_edipi_df or cg_null_edipi_df):
         status = "Failed"
-        print({f"'Today': {today},  'status': {status}, 'errors': {error_messages}"})
+        print({f"""Today: {today},  status: {status}, errors: {error_messages}"""})
     else:
         status = "Passed"
-        dbutils.notebook.exit({f"'Today': {today},'status': {status}, 'message': 'No errors found'"})
+        dbutils.notebook.exit({f"""Today: {today},status: {status}, message: No errors found """})
 
 main()
 
