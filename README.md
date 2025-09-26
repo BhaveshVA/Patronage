@@ -1,17 +1,3 @@
-# 🎖️ Patronage ETL Pipeline
-
-A databricks Patronage data pipeline for ETL processing using Apache Spark and Databricks.
-
----
-
-<!--
-##### How to update these diagrams
-- Edit the `.mmd` files in the `docs/` folder using a Mermaid live editor (https://mermaid.live/) or the VS Code Mermaid extension.
-- Export each diagram as a PNG and save as `etl_flowchart_alt.png`, `data_lineage_png.png`, and `scd2_upsert_logic.png` in the `docs/` folder.
-- The images will then appear below in this README.
-
----
--->
 ## 🏛️ High level Architecture
 ```mermaid
 flowchart TB
@@ -20,14 +6,13 @@ flowchart TB
         CaregiverCSVs["Caregiver CSVs"]
         SCDCSVs["SCD CSVs"]
         IdentityCorrelations["Identity Correlations Delta"]
-        NewPTDelta["New PT Delta"]
+        NewPTDelta["PT Indicator Delta Table"]
     end
     subgraph Processing
         direction LR
         SeedLoader["Seed Loader"]
         CaregiverAggregator["Caregiver Aggregator"]
-        SCDPreparer["SCD Preparer"]
-        PTIndicatorUpdater["PT Indicator Updater"]
+        SCDPreparer["SCD Preparer + PT Indicator Updater"]
         AuditLog["Audit Log"]
     end
     SCDType["Slowly Changing Dimensions Type 2"]
@@ -40,23 +25,20 @@ flowchart TB
     SeedLoader --> CaregiverAggregator
     SCDCSVs --> SCDPreparer
     IdentityCorrelations --> SCDPreparer
-    NewPTDelta --> PTIndicatorUpdater
+    NewPTDelta --> SCDPreparer
     IdentityCorrelations --> SeedLoader
     
     SeedLoader --> SCDType
     SCDPreparer --> SCDType
-    PTIndicatorUpdater --> SCDType
     CaregiverAggregator --> SCDType
     AuditLog --> SCDType
     SCDType --> DeltaTable
     
     SCDCSVs --> SeedLoader
     IdentityCorrelations --> CaregiverAggregator
-    NewPTDelta --> AuditLog
     
     SeedLoader -.-> AuditLog
     SCDPreparer -.-> AuditLog
-    PTIndicatorUpdater -.-> AuditLog
     CaregiverAggregator -.-> AuditLog
     linkStyle 0 stroke:#1f77b4,stroke-width:2px;
     linkStyle 1 stroke:#1f77b4,stroke-width:2px,stroke-dasharray: 4 2;
@@ -69,17 +51,13 @@ flowchart TB
     linkStyle 8 stroke:#9467bd,stroke-width:2px;
     linkStyle 9 stroke:#9467bd,stroke-width:2px;
     linkStyle 10 stroke:#9467bd,stroke-width:2px;
-    linkStyle 11 stroke:#9467bd,stroke-width:2px;
-    linkStyle 12 stroke:#8c564b,stroke-width:2px;
-    linkStyle 13 stroke:#ff7f0e,stroke-width:2px,stroke-dasharray: 4 2;
-    linkStyle 14 stroke:#2ca02c,stroke-width:2px,stroke-dasharray: 4 2;
-    linkStyle 15 stroke:#d62728,stroke-width:2px,stroke-dasharray: 4 2;
+    linkStyle 11 stroke:#8c564b,stroke-width:2px;
+    linkStyle 12 stroke:#ff7f0e,stroke-width:2px,stroke-dasharray: 4 2;
+    linkStyle 13 stroke:#2ca02c,stroke-width:2px,stroke-dasharray: 4 2;
+    linkStyle 14 stroke:#9467bd,stroke-width:2px,stroke-dasharray: 2 2;
+    linkStyle 15 stroke:#9467bd,stroke-width:2px,stroke-dasharray: 2 2;
     linkStyle 16 stroke:#9467bd,stroke-width:2px,stroke-dasharray: 2 2;
-    linkStyle 17 stroke:#9467bd,stroke-width:2px,stroke-dasharray: 2 2;
-    linkStyle 18 stroke:#9467bd,stroke-width:2px,stroke-dasharray: 2 2;
-    linkStyle 19 stroke:#9467bd,stroke-width:2px,stroke-dasharray: 2 2;
 ```
----
 
 ## 📊 ETL Workflow Diagram
 
