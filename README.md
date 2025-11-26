@@ -1,226 +1,372 @@
-## 🏛️ High level Architecture
+# VA Patronage Data Pipeline
+
+A robust, production-grade ETL pipeline for processing Veteran patronage data from Service Connected Disability (SCD) and Caregiver (CG) sources using PySpark and Delta Lake on Databricks.
+
+---
+
+## High-Level Architecture
+
 ```mermaid
 flowchart TB
-    subgraph Sources
+    subgraph Sources["Data Sources"]
         direction LR
         CaregiverCSVs["Caregiver CSVs"]
         SCDCSVs["SCD CSVs"]
         IdentityCorrelations["Identity Correlations Delta"]
-        NewPTDelta["PT Indicator Delta Table"]
+        PTDelta["PT Indicator Delta Table"]
     end
-    subgraph Processing
-        direction LR
-        SeedLoader["Seed Loader"]
-        CaregiverAggregator["Caregiver Aggregator"]
-        SCDPreparer["SCD Preparer + PT Indicator Updater"]
-        AuditLog["Audit Log"]
+    
+    subgraph Processing["Processing Layer"]
+        direction TB
+        Initializer["Table Initializer"]
+        IncrementalProcessor["Incremental Processor"]
+        EDIPIBackfill["EDIPI Backfill<br/>(Last Friday of Month)"]
+        DMDCGenerator["DMDC File Generator<br/>(Wed/Fri)"]
     end
-    SCDType["Slowly Changing Dimensions Type 2"]
-    subgraph Storage
+    
+    subgraph Storage["Storage Layer"]
         DeltaTable["Delta Table: Patronage"]
+        IdentityTable["Identity Correlation Table"]
+        CheckpointTable["DMDC Checkpoint Table"]
     end
     
-    CaregiverCSVs --> SeedLoader
-    CaregiverCSVs --> CaregiverAggregator
-    SeedLoader --> CaregiverAggregator
-    SCDCSVs --> SCDPreparer
-    IdentityCorrelations --> SCDPreparer
-    NewPTDelta --> SCDPreparer
-    IdentityCorrelations --> SeedLoader
+    subgraph Outputs["Outputs"]
+        DMDCFiles["DMDC Transfer Files<br/>(.txt fixed-width)"]
+        EDIPIFiles["EDIPI Backfill Files<br/>(.txt fixed-width)"]
+    end
     
-    SeedLoader --> SCDType
-    SCDPreparer --> SCDType
-    CaregiverAggregator --> SCDType
-    AuditLog --> SCDType
-    SCDType --> DeltaTable
+    %% Source to Processing flows
+    CaregiverCSVs --> Initializer
+    SCDCSVs --> Initializer
+    IdentityCorrelations --> Initializer
     
-    SCDCSVs --> SeedLoader
-    IdentityCorrelations --> CaregiverAggregator
+    CaregiverCSVs --> IncrementalProcessor
+    SCDCSVs --> IncrementalProcessor
+    IdentityCorrelations --> IncrementalProcessor
+    PTDelta --> IncrementalProcessor
     
-    SeedLoader -.-> AuditLog
-    SCDPreparer -.-> AuditLog
-    CaregiverAggregator -.-> AuditLog
-    linkStyle 0 stroke:#1f77b4,stroke-width:2px;
-    linkStyle 1 stroke:#1f77b4,stroke-width:2px,stroke-dasharray: 4 2;
-    linkStyle 2 stroke:#1f77b4,stroke-width:2px,stroke-dasharray: 2 4;
-    linkStyle 3 stroke:#ff7f0e,stroke-width:2px;
-    linkStyle 4 stroke:#2ca02c,stroke-width:2px;
-    linkStyle 5 stroke:#d62728,stroke-width:2px;
-    linkStyle 6 stroke:#2ca02c,stroke-width:2px,stroke-dasharray: 2 4;
-    linkStyle 7 stroke:#9467bd,stroke-width:2px;
-    linkStyle 8 stroke:#9467bd,stroke-width:2px;
-    linkStyle 9 stroke:#9467bd,stroke-width:2px;
-    linkStyle 10 stroke:#9467bd,stroke-width:2px;
-    linkStyle 11 stroke:#8c564b,stroke-width:2px;
-    linkStyle 12 stroke:#ff7f0e,stroke-width:2px,stroke-dasharray: 4 2;
-    linkStyle 13 stroke:#2ca02c,stroke-width:2px,stroke-dasharray: 4 2;
-    linkStyle 14 stroke:#9467bd,stroke-width:2px,stroke-dasharray: 2 2;
-    linkStyle 15 stroke:#9467bd,stroke-width:2px,stroke-dasharray: 2 2;
-    linkStyle 16 stroke:#9467bd,stroke-width:2px,stroke-dasharray: 2 2;
+    IdentityCorrelations --> EDIPIBackfill
+    IdentityCorrelations --> IdentityTable
+    
+    %% Processing to Storage flows
+    Initializer --> DeltaTable
+    IncrementalProcessor --> DeltaTable
+    EDIPIBackfill --> DeltaTable
+    
+    %% Storage to Output flows
+    DeltaTable --> DMDCGenerator
+    DeltaTable --> EDIPIBackfill
+    DMDCGenerator --> DMDCFiles
+    DMDCGenerator --> CheckpointTable
+    EDIPIBackfill --> EDIPIFiles
+    
+    %% Styling
+    classDef sourceStyle fill:#e1f5fe,stroke:#01579b
+    classDef processStyle fill:#fff3e0,stroke:#e65100
+    classDef storageStyle fill:#e8f5e9,stroke:#2e7d32
+    classDef outputStyle fill:#fce4ec,stroke:#c2185b
+    
+    class CaregiverCSVs,SCDCSVs,IdentityCorrelations,PTDelta sourceStyle
+    class Initializer,IncrementalProcessor,EDIPIBackfill,DMDCGenerator processStyle
+    class DeltaTable,IdentityTable,CheckpointTable storageStyle
+    class DMDCFiles,EDIPIFiles outputStyle
 ```
-
-## 📊 ETL Workflow Diagram
-
-```mermaid
-flowchart TD
-    A[Raw Data Sources] --> B[File Discovery]
-    B --> C[Data Preparation]
-    C -- Deduplication --> D["Delta Manager SCD2 Upsert"]
-    D -- Change Tracking --> E[Delta Table]
-    E --> F[Reporting & Analytics]
-```
-
-![ETL Workflow](docs/etl_flowchart_alt.png)
-*Figure 1: High-level ETL workflow showing the flow from raw sources through processing steps to the Delta table and reporting.*
 
 ---
 
-## 🧬 Data Lineage Diagram
+## Processing Modes
+
+The pipeline supports multiple processing modes to handle different operational scenarios:
 
 ```mermaid
 flowchart LR
-    subgraph Sources
-        A1[Caregiver CSV]
-        A2[SCD CSV]
-        A3[PT Indicator Delta Table]
-        A4[Identity Correlations Delta Table]
+    subgraph Modes["Processing Modes"]
+        direction TB
+        M1["<b>rebuild</b><br/>Full table rebuild<br/>from all source files"]
+        M2["<b>update</b><br/>Incremental processing<br/>of new files only"]
     end
-    A1 --> B[Data Preparation]
-    A2 --> B
-    A3 --> B
-    A4 --> B
-    B --> C[SCD2 Upsert Logic]
-    C --> D[Delta Table]
-    D --> E[Reporting]
+    
+    subgraph ScheduledTasks["Scheduled Tasks"]
+        direction TB
+        T1["<b>EDIPI Backfill</b><br/>Last Friday of Month<br/>Updates NULL EDIPIs"]
+        T2["<b>DMDC Transfer</b><br/>Wednesday & Friday<br/>Generates export files"]
+    end
+    
+    M1 --> Pipeline["run_pipeline()"]
+    M2 --> Pipeline
+    Pipeline --> T1
+    Pipeline --> T2
+    
+    style M1 fill:#bbdefb,stroke:#1976d2
+    style M2 fill:#c8e6c9,stroke:#388e3c
+    style T1 fill:#ffe0b2,stroke:#f57c00
+    style T2 fill:#f8bbd9,stroke:#c2185b
 ```
 
-![Data Lineage](docs/data_lineage_png.png)
-*Figure 2: Data lineage diagram showing how data moves from all sources, through each transformation, and into the Delta table for reporting.*
+| Mode | Trigger | Description |
+|------|---------|-------------|
+| `rebuild` | Manual | Drops existing table and reinitializes from all source files |
+| `update` | Manual/Scheduled | Processes only new files since last run (incremental) |
+| **EDIPI Backfill** | Auto (Last Friday) | Retroactively updates records with EDIPI from Identity Correlations |
+| **DMDC Transfer** | Auto (Wed/Fri) | Generates 42-character fixed-width files for DMDC downstream system |
 
 ---
 
-## 🔁 SCD2 Upsert Logic Flow
+## ETL Workflow Diagram
 
 ```mermaid
 flowchart TD
-    A[Incoming Record] --> B{Record Exists in Delta Table?}
-    B -- No --> C[Insert as New Record]
-    B -- Yes --> D{Data Changed?}
-    D -- No --> E[No Action]
-    D -- Yes --> F[Expire Old Record]
-    F --> G[Insert as New Version]
-    G --> H[Update Delta Table]
+    A["Raw Data Sources<br/>(SCD CSVs, CG CSVs)"] --> B["File Discovery<br/>discover_unprocessed_files()"]
+    B --> C["Data Preparation<br/>transform_scd_data() / transform_caregiver_data()"]
+    C --> D["Identity Correlation<br/>Join with ICN/EDIPI lookup"]
+    D --> E["Deduplication<br/>Window functions + ranking"]
+    E --> F["SCD2 Upsert Logic<br/>execute_delta_merge()"]
+    F --> G["Delta Table: Patronage"]
+    G --> H["DMDC Export<br/>generate_dmdc_transfer_file()"]
+    
+    style A fill:#e3f2fd
+    style G fill:#e8f5e9
+    style H fill:#fce4ec
 ```
 
-![SCD2 Upsert Logic Flow](docs/scd2_upsert_logic.png)
-*Figure 3: SCD2 upsert logic flow showing how new, changed, and unchanged records are handled in the Delta table.*
-
 ---
-<!--
- 
-## 🧩 Project Structure
 
-\`\`\`mermaid
+## Data Lineage Diagram
+
+```mermaid
 flowchart LR
-    root((Project Root))
-    src["src/"]
-    tests["tests/"]
-    config["config.yml -- Sample configuration"]
-    reqs["requirements.txt -- Project dependencies"]
-    github[".github/"]
-    workflows["workflows/"]
-    ci["ci.yml (CI/CD pipeline configuration)"]
-    src_init["__init__.py"]
-    src_config["config.py (Configuration management)"]
-    src_fp["file_processor.py (Main ETL logic )"]
-    src_schemas["schemas.py (All Spark schemas)"]
-    src_main["main.py (Entrypoint)"]
-    tests_config["test_config.py"]
-    tests_transformer["test_transformer.py"]
-    tests_fp["test_file_processor.py"]
-
-    root -*-> src
-    root -*-> tests
-    root -*-> config
-    root -*-> reqs
-    root -*-> github
-    src -*-> src_init
-    src -*-> src_config
-    src -*-> src_fp
-    src -*-> src_schemas
-    src -*-> src_main
-    tests -*-> tests_config
-    tests -*-> tests_transformer
-    tests -*-> tests_fp
-    github -*-> workflows
-    workflows -*-> ci
-
-\`\`\`
--->
-<!--
-## 🚀 Onboarding: Quick Start for New Team Members
-
-1. **Clone the repository**
-2. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. **Configure Databricks connection:**
-   - Set up Databricks CLI and configure your profile
-   - Ensure you have access to all required data sources (see `config.yml`)
-4. **Run the ETL pipeline:**
-   ```bash
-   python src/main.py --config config.yml
-   ```
-5. **Run tests:**
-   ```bash
-   pytest tests/
-   ```
-6. **Check CI/CD:**
-   - All pushes and PRs are tested automatically via GitHub Actions
-
-\`\`\`
--->
-
-## 🧠 Business Logic Overview
-
-- **Seed Load:** Loads initial caregivers from CSV, joins with identity correlations, and writes to Delta table.
-- **Incremental Processing:**
-  - Scans source directories for new/updated files (Caregiver, SCD, PT Indicator)
-  - Prepares and deduplicates data using Spark DataFrames
-  - Applies SCD2 logic (Slowly Changing Dimension Type 2) for upserts
-  - Tracks changes and logs them in the Delta table
-- **Delta Lake:** All data is stored in Delta format for ACID compliance and efficient upserts.
-- **Partitioning:** Data is partitioned by batch and record status for performance.
-- **Change Tracking:** Each upsert logs what changed, when, and why (for audit and reporting).
-
----
-<!--
-## 🧪 Testing & Development
-
-- All ETL logic is modular and testable (see `tests/`)
-- Use `pytest` for unit and integration tests
-- Code style: `black` (formatting), `flake8` (linting)
-- CI/CD: See `.github/workflows/ci.yml` for pipeline details
+    subgraph Sources["Sources"]
+        A1["Caregiver CSV"]
+        A2["SCD CSV"]
+        A3["PT Indicator Delta"]
+        A4["Identity Correlations Delta"]
+    end
+    
+    subgraph Transform["Transformations"]
+        B1["transform_caregiver_data()"]
+        B2["transform_scd_data()"]
+        B3["build_identity_correlation_table()"]
+    end
+    
+    subgraph Merge["SCD2 Logic"]
+        C1["identify_record_changes()"]
+        C2["create_scd_records_with_audit()"]
+        C3["execute_delta_merge()"]
+    end
+    
+    subgraph Storage["Storage"]
+        D1["Delta Table: Patronage"]
+        D2["Identity Lookup Table"]
+    end
+    
+    subgraph Output["Outputs"]
+        E1["DMDC Transfer Files"]
+        E2["EDIPI Backfill Files"]
+        E3["Reporting & Analytics"]
+    end
+    
+    A1 --> B1
+    A2 --> B2
+    A3 --> B2
+    A4 --> B3
+    
+    B1 --> C1
+    B2 --> C1
+    B3 --> D2
+    D2 --> B2
+    
+    C1 --> C2
+    C2 --> C3
+    C3 --> D1
+    
+    D1 --> E1
+    D1 --> E2
+    D1 --> E3
+```
 
 ---
 
-## 🤝 Contributing & Support
+## SCD2 Upsert Logic Flow
 
-- Create a new branch for your feature or bugfix
-- Add/modify tests as needed
-- Open a pull request for review
-- For help, see code comments, this README, or ask a senior team member
----
--->
-## 📖 References
-<!-- - Original Databricks notebook: `Patronage V4.ipynb` -->
-- Delta Lake docs: https://docs.delta.io/latest/delta-intro.html
-- PySpark docs: https://spark.apache.org/docs/latest/api/python/
+The pipeline implements Slowly Changing Dimension Type 2 (SCD2) to maintain complete historical records:
+
+```mermaid
+flowchart TD
+    A["Incoming Record"] --> B{"Record Exists<br/>in Delta Table?"}
+    B -- "No" --> C["INSERT<br/>as New Record<br/>(RecordStatus=True)"]
+    B -- "Yes" --> D{"Data Changed?<br/>(Hash comparison)"}
+    D -- "No" --> E["No Action<br/>(Skip record)"]
+    D -- "Yes" --> F["EXPIRE Old Record<br/>(RecordStatus=False,<br/>End_Date=Today)"]
+    F --> G["INSERT New Version<br/>(RecordStatus=True,<br/>Effective_Date=Today)"]
+    
+    C --> H["Delta Table Updated"]
+    G --> H
+    
+    style A fill:#e3f2fd
+    style C fill:#c8e6c9
+    style F fill:#ffcdd2
+    style G fill:#c8e6c9
+    style H fill:#e8f5e9
+```
+
+### Change Detection
+- **SCD Records**: Hash comparison of `SC_Combined_Disability_Percentage` and `PT_Indicator`
+- **Caregiver Records**: Hash comparison of `Status_Begin_Date`, `Status_Termination_Date`, `Applicant_Type`, `Caregiver_Status`
 
 ---
-## Contributions
-- Umair Ahmed: QA Engineer
-- Bhavesh Patel: Data Engineer
+
+## DMDC Transfer File Generation
+
+The pipeline generates fixed-width transfer files for the DMDC (Defense Manpower Data Center) downstream system:
+
+```mermaid
+flowchart TD
+    A["Scheduled Trigger<br/>(Wednesday/Friday)"] --> B["Get Last Run Date<br/>from Checkpoint Table"]
+    B --> C["Query Eligible Records<br/>(Active, Has EDIPI)"]
+    C --> D{"Records Found?"}
+    D -- "No" --> E["Skip Export<br/>(No new records)"]
+    D -- "Yes" --> F["Generate Fixed-Width File<br/>(42 chars per record)"]
+    F --> G["Write to Blob Storage<br/>/mnt/ci-vba-edw-2/..."]
+    G --> H["Update Checkpoint Table"]
+    
+    style A fill:#fff3e0
+    style F fill:#e8f5e9
+    style G fill:#e3f2fd
+```
+
+### DMDC Record Format (42 characters)
+| Field | Width | Description |
+|-------|-------|-------------|
+| EDIPI | 10 | Electronic Data Interchange Personal Identifier |
+| Batch_CD | 3 | Source type (SCD/CG) |
+| SC_Combined_Disability_Percentage | 3 | Combined disability rating |
+| Status_Begin_Date | 8 | YYYYMMDD format |
+| PT_Indicator | 1 | Permanent/Total indicator |
+| Individual_Unemployability | 1 | Unemployability flag |
+| Status_Last_Update | 8 | YYYYMMDD format |
+| Status_Termination_Date | 8 | YYYYMMDD format |
+
 ---
 
+## EDIPI Backfill Process
+
+Monthly process to retroactively populate EDIPI for records that were created without one:
+
+```mermaid
+flowchart TD
+    A["Last Friday of Month"] --> B["Find Records<br/>with NULL EDIPI"]
+    B --> C["Join with<br/>Identity Correlations"]
+    C --> D{"Matches Found?"}
+    D -- "No" --> E["No Updates Needed"]
+    D -- "Yes" --> F["Generate Audit File<br/>(Before update)"]
+    F --> G["UPDATE Patronage Table<br/>(Set EDIPI values)"]
+    G --> H["Log Results"]
+    
+    style A fill:#fff3e0
+    style F fill:#e8f5e9
+    style G fill:#bbdefb
+```
+
+---
+
+## Business Logic Overview
+
+### Core Processing Pipeline
+
+| Component | Function | Description |
+|-----------|----------|-------------|
+| **Table Initializer** | `initialize_patronage_table()` | Creates Delta table from SCD and CG seed files |
+| **Identity Builder** | `build_identity_correlation_table()` | Daily refresh of ICN-to-EDIPI lookup table |
+| **File Discovery** | `discover_unprocessed_files()` | Scans blob storage for new/unprocessed files |
+| **SCD Transformer** | `transform_scd_data()` | Prepares SCD records with PT indicator enrichment |
+| **CG Transformer** | `transform_caregiver_data()` | Prepares Caregiver records with status mapping |
+| **Change Detector** | `identify_record_changes()` | Hash-based comparison for SCD2 logic |
+| **Delta Merger** | `execute_delta_merge()` | Applies upserts/expirations to Delta table |
+| **DMDC Generator** | `generate_dmdc_transfer_file()` | Creates fixed-width export files |
+| **EDIPI Backfill** | `run_edipi_backfill()` | Monthly EDIPI population from identity correlations |
+
+### Data Sources
+
+| Source | Type | Description |
+|--------|------|-------------|
+| **SCD CSVs** | Service Connected Disability | Veteran disability ratings (`CPIDODIEX_*.csv`) |
+| **Caregiver CSVs** | CARMA Exports | Caregiver program data (`*caregiver*.csv`) |
+| **Identity Correlations** | Delta Table | MVI person-identifier mappings |
+| **PT Indicator** | Delta Table | Permanent/Total disability indicators |
+
+### Key Features
+
+- **SCD Type 2**: Full history tracking with `RecordStatus`, `Effective_Date`, `End_Date`
+- **Delta Lake**: ACID-compliant storage with efficient upserts and time travel
+- **Liquid Clustering**: Optimized by `Batch_CD` and `RecordStatus` for query performance
+- **Audit Trail**: Every change logged with `change_log` column documenting what changed
+- **Checkpointing**: DMDC exports track last run timestamp to avoid duplicates
+- **Broadcast Joins**: Performance optimization for small lookup tables
+
+---
+
+## Key Constants and Configuration
+
+```python
+# Source Types
+SOURCE_TYPE_SCD = "SCD"   # Service Connected Disability
+SOURCE_TYPE_CG = "CG"     # Caregiver
+
+# Table Names
+PATRONAGE_TABLE_NAME = "patronage"
+IDENTITY_TABLE_NAME = "identity_correlation_lookup"
+DMDC_CHECKPOINT_TABLE_NAME = "dmdc_export_checkpoint"
+
+# Scheduled Tasks
+# - EDIPI Backfill: Last Friday of each month
+# - DMDC Export: Every Wednesday and Friday
+```
+
+---
+
+## Usage
+
+### Running the Pipeline
+
+```python
+import patronage_pipeline as pipeline
+
+# Incremental update (processes new files only)
+pipeline.run_pipeline("update", verbose_logging=False)
+
+# Full rebuild (reinitializes from all source files)
+pipeline.run_pipeline("rebuild", verbose_logging=True)
+```
+
+### From the Notebook Orchestrator
+
+The `Pipeline_Runner.ipynb` notebook provides:
+- Automatic mode detection (initialize vs update)
+- Visual Mermaid diagrams
+- File reconciliation tools
+- Unit testing cells
+
+---
+
+## References
+
+- Delta Lake Documentation: https://docs.delta.io/latest/delta-intro.html
+- PySpark Documentation: https://spark.apache.org/docs/latest/api/python/
+- Databricks Delta Lake Guide: https://docs.databricks.com/delta/index.html
+
+---
+
+## Contributors
+
+- **Umair Ahmed**: QA Engineer
+- **Bhavesh Patel**: Data Engineer
+
+---
+
+## Version History
+
+| Date | Version | Changes |
+|------|---------|---------|
+| 2024-12-18 | 1.0 | Initial release with SCD and Caregiver processing |
+| 2025-11-19 | 2.0 | Added EDIPI Backfill, DMDC Transfer, refactored for modularity |
+| 2025-11-26 | 2.1 | Code quality improvements, DRY patterns, enhanced logging |
