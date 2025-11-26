@@ -112,10 +112,63 @@ flowchart LR
 
 ---
 
+## Databricks Job Execution Flow
+
+The pipeline runs as a scheduled Databricks Job:
+
+```mermaid
+flowchart LR
+    subgraph DatabricksJob["Databricks Job (Scheduled Daily)"]
+        A["Job Trigger<br/>(Daily 9:00 AM EST)"]
+    end
+    
+    subgraph Orchestrator["Pipeline_Runner.ipynb"]
+        B["Import patronage_pipeline"]
+        C["Detect Processing Mode"]
+        D["run_pipeline(mode, verbose)"]
+    end
+    
+    subgraph CoreLogic["patronage_pipeline.py"]
+        E["process_patronage_data()"]
+        F["Process SCD & CG Files"]
+        G{"Check Scheduled Tasks"}
+    end
+    
+    subgraph ScheduledTasks["Conditional Tasks"]
+        H["EDIPI Backfill<br/>(Last Friday of Month)"]
+        I["DMDC Transfer<br/>(Wednesday/Friday)"]
+    end
+    
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+    G -->|"Last Friday?"| H
+    G -->|"Wed/Fri?"| I
+    
+    %% Styling
+    style A fill:#bbdefb,stroke:#1976d2
+    style D fill:#fff3e0,stroke:#e65100
+    style E fill:#e8f5e9,stroke:#2e7d32
+    style H fill:#ffe0b2,stroke:#f57c00
+    style I fill:#f8bbd9,stroke:#c2185b
+```
+
+### Key Operational Notes
+- **Daily Processing**: The job runs every day in `update` mode, processing only new files since the last run
+- **Automatic Task Triggers**: EDIPI Backfill and DMDC Transfer tasks are triggered automatically based on the day of the week/month
+- **Monitoring**: Job status and logs are available in the Databricks Jobs UI
+- **Alerts**: Email notifications are sent on job failure to the data engineering team
+- **Manual Runs**: The pipeline can be triggered manually from the Databricks Jobs UI or by running the notebook directly
+
+---
+
 ## ETL Workflow Diagram
 
 ```mermaid
-flowchart TD
+flowchart LR
     A["Raw Data Sources<br/>(SCD CSVs, CG CSVs)"] --> B["File Discovery<br/>discover_unprocessed_files()"]
     B --> C["Data Preparation<br/>transform_scd_data() / transform_caregiver_data()"]
     C --> D["Identity Correlation<br/>Join with ICN/EDIPI lookup"]
@@ -134,7 +187,7 @@ flowchart TD
 ## Data Lineage Diagram
 
 ```mermaid
-flowchart LR
+flowchart TD
     subgraph Sources["Sources"]
         A1["Caregiver CSV"]
         A2["SCD CSV"]
@@ -182,6 +235,19 @@ flowchart LR
     D1 --> E1
     D1 --> E2
     D1 --> E3
+    
+    %% Styling
+    classDef sourceStyle fill:#e1f5fe,stroke:#01579b
+    classDef transformStyle fill:#fff3e0,stroke:#e65100
+    classDef mergeStyle fill:#f3e5f5,stroke:#7b1fa2
+    classDef storageStyle fill:#e8f5e9,stroke:#2e7d32
+    classDef outputStyle fill:#fce4ec,stroke:#c2185b
+    
+    class A1,A2,A3,A4 sourceStyle
+    class B1,B2,B3 transformStyle
+    class C1,C2,C3 mergeStyle
+    class D1,D2 storageStyle
+    class E1,E2,E3 outputStyle
 ```
 
 ---
@@ -191,7 +257,7 @@ flowchart LR
 The pipeline implements Slowly Changing Dimension Type 2 (SCD2) to maintain complete historical records:
 
 ```mermaid
-flowchart TD
+flowchart LR
     A["Incoming Record"] --> B{"Record Exists<br/>in Delta Table?"}
     B -- "No" --> C["INSERT<br/>as New Record<br/>(RecordStatus=True)"]
     B -- "Yes" --> D{"Data Changed?<br/>(Hash comparison)"}
@@ -220,7 +286,7 @@ flowchart TD
 The pipeline generates fixed-width transfer files for the DMDC (Defense Manpower Data Center) downstream system:
 
 ```mermaid
-flowchart TD
+flowchart LR
     A["Scheduled Trigger<br/>(Wednesday/Friday)"] --> B["Get Last Run Date<br/>from Checkpoint Table"]
     B --> C["Query Eligible Records<br/>(Active, Has EDIPI)"]
     C --> D{"Records Found?"}
@@ -253,7 +319,7 @@ flowchart TD
 Monthly process to retroactively populate EDIPI for records that were created without one:
 
 ```mermaid
-flowchart TD
+flowchart LR
     A["Last Friday of Month"] --> B["Find Records<br/>with NULL EDIPI"]
     B --> C["Join with<br/>Identity Correlations"]
     C --> D{"Matches Found?"}
@@ -370,3 +436,4 @@ The `Pipeline_Runner.ipynb` notebook provides:
 | 2024-12-18 | 1.0 | Initial release with SCD and Caregiver processing |
 | 2025-11-19 | 2.0 | Added EDIPI Backfill, DMDC Transfer, refactored for modularity |
 | 2025-11-26 | 2.1 | Code quality improvements, DRY patterns, enhanced logging |
+
