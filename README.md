@@ -292,7 +292,7 @@ flowchart LR
     C --> D{"Records Found?"}
     D -- "No" --> E["Skip Export<br/>(No new records)"]
     D -- "Yes" --> F["Generate Fixed-Width File<br/>(42 chars per record)"]
-    F --> G["Write to Blob Storage<br/>/mnt/ci-vba-edw-2/..."]
+    F --> G["Write to Blob Storage<br/>/dbfs/mnt/ci-patronage/..."]
     G --> H["Update Checkpoint Table"]
     
     style A fill:#fff3e0
